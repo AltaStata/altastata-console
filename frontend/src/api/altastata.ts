@@ -1,47 +1,8 @@
 import protobufjs, { type Type } from "protobufjs/dist/protobuf";
 import type { AccountInfo, FileEntry, ListResponse, VersionEntry } from "@/types";
+import { extractMyUserFromProperties, getRuntimeSettings } from "@/config/runtimeSettings";
 
 type Bytes = Uint8Array;
-
-function extractMyUserFromProperties(text: string): string {
-  for (const raw of text.split("\n")) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const idx = line.indexOf("=");
-    if (idx < 0) continue;
-    const key = line.slice(0, idx).trim();
-    const value = line.slice(idx + 1).trim();
-    if (key === "myuser") return value;
-  }
-  return "";
-}
-
-const configuredAccountId = (import.meta.env.VITE_ALTASTATA_ACCOUNT_ID as string | undefined)
-  ?? "unknown-account";
-const configuredUserProperties = ((import.meta.env.VITE_ALTASTATA_USER_PROPERTIES as string | undefined) ?? "")
-  .replace(/\\n/g, "\n");
-const configuredUserName = import.meta.env.VITE_ALTASTATA_GRPC_USER_NAME as string | undefined;
-const derivedMyUserName = extractMyUserFromProperties(configuredUserProperties);
-
-const CONFIG = {
-  grpcBaseUrl: (import.meta.env.VITE_ALTASTATA_GRPC_BASE_URL as string | undefined)
-    ?? "http://127.0.0.1:9877",
-  accountId: configuredAccountId,
-  // Same behavior as altastata-ui: prefer myuser from account properties.
-  userName: derivedMyUserName
-    || configuredUserName
-    || configuredAccountId.split(".").at(-1)
-    || "",
-  accountPassword: (import.meta.env.VITE_ALTASTATA_PASSWORD as string | undefined)
-    ?? "",
-  userProperties: configuredUserProperties,
-  privateKey: ((import.meta.env.VITE_ALTASTATA_PRIVATE_KEY as string | undefined) ?? "")
-    .replace(/\\n/g, "\n"),
-  autoBootstrap: (import.meta.env.VITE_ALTASTATA_AUTO_BOOTSTRAP as string | undefined)
-    === "true",
-  bootstrapMode: (import.meta.env.VITE_ALTASTATA_BOOTSTRAP_MODE as string | undefined)
-    ?? "auto",
-};
 
 const PROTO_DEF = `
 syntax = "proto3";
@@ -141,11 +102,13 @@ function T(name: string): Type {
 }
 
 function baseUrl(): string {
-  return CONFIG.grpcBaseUrl.trim().replace(/\/+$/, "");
+  const config = getRuntimeSettings();
+  return config.grpcBaseUrl.trim().replace(/\/+$/, "");
 }
 
 function token(): string {
-  const tokenUser = (activeAuthUserName || CONFIG.userName).trim();
+  const config = getRuntimeSettings();
+  const tokenUser = (activeAuthUserName || config.userName).trim();
   return `local-${tokenUser}`;
 }
 
@@ -335,7 +298,7 @@ function guessMime(name: string): string | null {
 
 let authBootstrapDone = false;
 let authBootstrapInFlight: Promise<void> | null = null;
-let activeAuthUserName = CONFIG.userName;
+let activeAuthUserName = getRuntimeSettings().userName;
 
 function alternateAuthUserName(userName: string): string | null {
   const normalized = userName.trim();
@@ -482,23 +445,24 @@ async function ensureAuthBootstrap(): Promise<void> {
     return;
   }
   authBootstrapInFlight = (async () => {
-    const bootstrapUser = (activeAuthUserName || CONFIG.userName).trim();
+    const config = getRuntimeSettings();
+    const bootstrapUser = (activeAuthUserName || config.userName).trim();
     if (!bootstrapUser) throw new Error("No auth user configured");
-    const hasFullBootstrapMaterial = Boolean(CONFIG.userProperties && CONFIG.privateKey);
-    const fullBootstrap = (CONFIG.bootstrapMode === "full")
-      || (CONFIG.bootstrapMode === "auto" && hasFullBootstrapMaterial);
+    const hasFullBootstrapMaterial = Boolean(config.userProperties && config.privateKey);
+    const fullBootstrap = (config.bootstrapMode === "full")
+      || (config.bootstrapMode === "auto" && hasFullBootstrapMaterial);
     if (fullBootstrap) {
       await grpcUnary(
         "altastata.v1.UsersService/SetUserProperties",
         "SetUserPropertiesRequest",
-        { userName: bootstrapUser, userProperties: CONFIG.userProperties },
+        { userName: bootstrapUser, userProperties: config.userProperties },
         "SetUserPropertiesResponse",
         false,
       );
       await grpcUnary(
         "altastata.v1.UsersService/SetPrivateKey",
         "SetPrivateKeyRequest",
-        { userName: bootstrapUser, privateKeyEncrypted: CONFIG.privateKey },
+        { userName: bootstrapUser, privateKeyEncrypted: config.privateKey },
         "SetPrivateKeyResponse",
         false,
       );
@@ -506,7 +470,7 @@ async function ensureAuthBootstrap(): Promise<void> {
     await grpcUnary(
       "altastata.v1.UsersService/SetPasswordForUser",
       "SetPasswordForUserRequest",
-      { userName: bootstrapUser, accountPassword: CONFIG.accountPassword },
+      { userName: bootstrapUser, accountPassword: config.accountPassword },
       "SetPasswordForUserResponse",
       false,
     );
@@ -520,12 +484,17 @@ async function ensureAuthBootstrap(): Promise<void> {
 }
 
 async function maybeBootstrap(): Promise<void> {
-  if (!CONFIG.autoBootstrap) return;
+  if (!getRuntimeSettings().autoBootstrap) return;
   await ensureAuthBootstrap();
 }
 
 function canBootstrapFromEnv(): boolean {
-  return Boolean((activeAuthUserName || CONFIG.userName) && CONFIG.accountPassword);
+  const config = getRuntimeSettings();
+  return Boolean((activeAuthUserName || config.userName) && config.accountPassword);
+}
+
+function isPasswordBootstrapError(message: string): boolean {
+  return /password is null|call setpassword first|set password for user failed|account_password cannot be empty/i.test(message);
 }
 
 async function withBootstrapRetry<T>(fn: () => Promise<T>): Promise<T> {
@@ -538,11 +507,14 @@ async function withBootstrapRetry<T>(fn: () => Promise<T>): Promise<T> {
       if (altUser && altUser !== activeAuthUserName) {
         activeAuthUserName = altUser;
         authBootstrapDone = false;
+        if (canBootstrapFromEnv()) {
+          await ensureAuthBootstrap();
+        }
         return fn();
       }
     }
     const shouldRetry = canBootstrapFromEnv()
-      && (/status=16|invalid token|failed to fetch/i.test(message));
+      && (/status=16|invalid token|failed to fetch/i.test(message) || isPasswordBootstrapError(message));
     if (!shouldRetry) throw error;
     await ensureAuthBootstrap();
     return fn();
@@ -570,17 +542,50 @@ function authHint(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
   if (/status=16|invalid token/i.test(message)) {
     return new Error(
-      `${message}. Provide VITE_ALTASTATA_USER_PROPERTIES and VITE_ALTASTATA_PRIVATE_KEY in frontend/.env.local, or bootstrap user with tests/js-grpc-ui first.`,
+      `${message}. Open Settings and provide user properties/private key/password, then run bootstrap.`,
     );
   }
   return new Error(message);
 }
 
+export function applyRuntimeSettings(): void {
+  const config = getRuntimeSettings();
+  activeAuthUserName = config.userName;
+  authBootstrapDone = false;
+  authBootstrapInFlight = null;
+}
+
+export async function bootstrapCurrentSettings(): Promise<void> {
+  applyRuntimeSettings();
+  await ensureAuthBootstrap();
+}
+
+export async function setPasswordForCurrentSettings(): Promise<void> {
+  applyRuntimeSettings();
+  const config = getRuntimeSettings();
+  const userName = (config.userName || "").trim();
+  const accountPassword = config.accountPassword ?? "";
+  if (!userName) {
+    throw new Error("User name is required.");
+  }
+  if (!accountPassword) {
+    throw new Error("Password is required.");
+  }
+  await grpcUnary(
+    "altastata.v1.UsersService/SetPasswordForUser",
+    "SetPasswordForUserRequest",
+    { userName, accountPassword },
+    "SetPasswordForUserResponse",
+    false,
+  );
+}
+
 export async function getAccount(): Promise<AccountInfo> {
+  const config = getRuntimeSettings();
   return {
-    account_id: CONFIG.accountId,
-    display_name: extractMyUserFromProperties(CONFIG.userProperties)
-      || CONFIG.accountId.split(".").at(-1)
+    account_id: config.accountId,
+    display_name: extractMyUserFromProperties(config.userProperties)
+      || config.accountId.split(".").at(-1)
       || "unknown",
   };
 }

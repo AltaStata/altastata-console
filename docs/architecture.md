@@ -29,6 +29,7 @@ column to the right. Clicking a file replaces the right-most preview pane.
 | right preview pane | `frontend/src/components/PreviewPane.tsx` |
 | bottom action bar | `frontend/src/components/BottomToolbar.tsx` |
 | native window title (account) | `frontend/src/App.tsx` `<AppBar>` |
+| account settings dialog | `frontend/src/App.tsx` `<Dialog>` |
 
 ## Runtime data path
 
@@ -56,6 +57,13 @@ The frontend currently mirrors JavaFX behavior:
 | CSV preview | treated as text (`text/csv`) |
 | Preview metadata | `GetAttributes` (`size`, `readers`) + version tag parsing |
 | User derivation | `myuser` from user properties (JavaFX-compatible) |
+
+## Runtime settings and secrets
+
+- Connection/auth settings are provided at runtime from the in-app Settings dialog.
+- Values are stored locally in browser storage for developer convenience.
+- `.env.local` can provide local defaults, but secrets are not meant to be committed.
+- Source control policy: never commit real user properties, private keys, or passwords.
 
 ## Optional backend adapter
 
