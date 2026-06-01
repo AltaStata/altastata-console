@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { Box } from "@mui/material";
 import { listDir } from "@/api/altastata";
@@ -206,8 +206,10 @@ export default function MillerColumns({
           dir="ltr"
         >
           {columns.map((col, idx) => (
-            <Box key={`${idx}-${col.path}`} sx={{ display: "contents" }}>
+            <Fragment key={`${idx}-${col.path}`}>
               <Panel
+                id={`miller-col-${col.path}`}
+                order={idx}
                 defaultSize={getColumnDefaultSize(columns.length)}
                 minSize={12}
               >
@@ -227,9 +229,14 @@ export default function MillerColumns({
                   background: "rgba(0,0,0,0.18)",
                 }}
               />
-            </Box>
+            </Fragment>
           ))}
-          <Panel defaultSize={38} minSize={20}>
+          <Panel
+            id="miller-preview"
+            order={columns.length}
+            defaultSize={38}
+            minSize={20}
+          >
             <PreviewPane file={previewFile} />
           </Panel>
         </PanelGroup>
