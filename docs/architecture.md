@@ -29,48 +29,43 @@ column to the right. Clicking a file replaces the right-most preview pane.
 | right preview pane | `frontend/src/components/PreviewPane.tsx` |
 | bottom action bar | `frontend/src/components/BottomToolbar.tsx` |
 | native window title (account) | `frontend/src/App.tsx` `<AppBar>` |
+| account settings dialog | `frontend/src/App.tsx` `<Dialog>` |
 
-## Backend → AltaStata
+## Runtime data path
 
 ```
-React (axios)  →  FastAPI /api/*  →  altastata.AltaStataFunctions
-                                       │
-                                       ▼
-                                    Py4J / gRPC
-                                       │
-                                       ▼
-                                   JVM gateway (altastata-grpc-1.0.0-uber.jar)
-                                       │
-                                       ▼
-                                  AltaStata cloud
+React (Vite dev / static build)
+  └─ grpc-web calls from `frontend/src/api/altastata.ts`
+      ├─ UsersService       (bootstrap/password)
+      ├─ FileOpsService     (list/getBuffer/read/upload/delete)
+      ├─ AttributesService  (size/readers metadata)
+      └─ SharingService     (share/revoke)
+            │
+            ▼
+      altastata-grpc :9877 (Java)
+            │
+            ▼
+      AltaStata cloud
 ```
 
-Endpoints (see `backend/src/altastata_console/api/`):
+The frontend currently mirrors JavaFX behavior:
 
-| Path | Purpose |
+| Behavior | Current implementation |
 |---|---|
-| `GET /api/health` | liveness probe |
-| `GET /api/account` | account id and display name |
-| `GET /api/files?path=…` | directory listing |
-| `GET /api/preview?path=…&version=…` | streaming bytes for inline preview |
-| `GET /api/versions?path=…` | list historical versions (parses `✹`) |
+| Miller columns (one level per click) | `ListVersions` with `includingSubdirectories=false` |
+| Text preview (large files) | `GetBuffer` first chunk only (`size` limited) |
+| CSV preview | treated as text (`text/csv`) |
+| Preview metadata | `GetAttributes` (`size`, `readers`) + version tag parsing |
+| User derivation | `myuser` from user properties (JavaFX-compatible) |
 
-## Open work for the implementation phase
+## Runtime settings and secrets
 
-1. **Wire `AltaStataFunctions`** into `api/files.py`, `api/preview.py`,
-   `api/versions.py`. The mock data in `files.py` can stay behind a flag for
-   tests.
-2. **Auth.** The console needs to know which account to use. Two options:
-   (a) container reads `~/.altastata/accounts/<id>/` like the JavaFX app and
-   exposes one fixed account, or (b) login screen prompts for credentials
-   and passes them to `AltaStataFunctions.from_credentials(...)`.
-3. **Toolbar actions.** Today they are stubs; wire to upload (multipart),
-   download (streaming response), share (readers list mutation), lock/unlock
-   (encryption toggle), new folder, delete.
-4. **Versions UI.** Show a timeline / selector when a file is selected, then
-   pass `version` through to `/api/preview`.
-5. **Error handling.** Wrap all axios calls in a notistack provider; surface
-   gRPC/Py4J errors to the user.
-6. **MIME types.** Backend should guess per extension before streaming.
-7. **CI.** Add GitHub Actions workflow: lint + typecheck + tests for both
-   frontend and backend, plus a Docker build smoke test.
+- Connection/auth settings are provided at runtime from the in-app Settings dialog.
+- Values are stored locally in browser storage for developer convenience.
+- `.env.local` can provide local defaults, but secrets are not meant to be committed.
+- Source control policy: never commit real user properties, private keys, or passwords.
+
+## Optional backend adapter
+
+`backend/` (FastAPI + Python `altastata`) remains in the repo as an optional
+adapter/runtime path. It is not required for the default JS + Java gRPC flow.

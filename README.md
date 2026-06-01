@@ -56,17 +56,66 @@ npm run dev   # → http://localhost:5173
 
 Open <http://localhost:5173>.
 
-Default local account is Bob. To override for frontend gRPC mode, create
-`frontend/.env.local`:
+Open the top-right settings button in the app and provide runtime values:
+
+- gRPC base URL
+- account ID
+- user name
+- user properties
+- private key
+- password
+
+Then use **Save & Run Bootstrap** to run:
+
+1. `SetUserProperties`
+2. `SetPrivateKey`
+3. `SetPasswordForUser`
+
+This is now the preferred flow for local development.
+
+You can still prefill defaults via `frontend/.env.local` (safe placeholders only):
 
 ```bash
 VITE_ALTASTATA_GRPC_BASE_URL=http://127.0.0.1:9877
-VITE_ALTASTATA_ACCOUNT_ID=amazon.rsa.bob123
-VITE_ALTASTATA_GRPC_USER_NAME=bob123_rsa
-VITE_ALTASTATA_PASSWORD=123
-# Optional if server is not pre-bootstrapped:
+VITE_ALTASTATA_ACCOUNT_ID=amazon.rsa.<user>
+VITE_ALTASTATA_GRPC_USER_NAME=<user>
+# Password is entered manually in Settings each session.
+# Optional defaults only; do not commit real values:
 # VITE_ALTASTATA_USER_PROPERTIES=<multiline properties string with \n>
 # VITE_ALTASTATA_PRIVATE_KEY=<encrypted private key with \n>
+VITE_ALTASTATA_AUTO_BOOTSTRAP=true
+VITE_ALTASTATA_BOOTSTRAP_MODE=auto
+```
+
+## Secrets policy
+
+- Never commit real `userProperties`, `privateKey`, or `password`.
+- `password` is not persisted to browser localStorage by the app.
+- Keep sensitive values in local runtime settings and/or local `.env.local`.
+- `.env.local` is gitignored in this repo, but always verify with `git status` before committing.
+- If a secret is accidentally committed, rotate it immediately.
+
+### Optional pre-commit secret guard
+
+This repo includes `scripts/prevent-secrets-commit.sh` to block common mistakes
+before commit.
+
+Enable it locally:
+
+```bash
+cd /path/to/altastata-console
+ln -sf ../../scripts/prevent-secrets-commit.sh .git/hooks/pre-commit
+```
+
+What it blocks:
+
+- staging `.env`-style files and common key files (`.pem`, `private.key`)
+- staged diff lines that look like private keys or password fields
+
+Intentional override (rare):
+
+```bash
+ALLOW_SECRETS_COMMIT=1 git commit -m "..."
 ```
 
 ## Production build
