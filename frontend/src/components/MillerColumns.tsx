@@ -63,12 +63,10 @@ export default function MillerColumns({
     } as ColumnState;
   }, [getColumnTitle, sortEntries]);
 
-  const getColumnDefaultSize = useCallback((idx: number, count: number) => {
+  const getColumnDefaultSize = useCallback((count: number) => {
     if (count === 0) return 20;
     const totalColumnSpace = 62;
-    const weight = 2 ** idx;
-    const totalWeight = 2 ** count - 1;
-    return (totalColumnSpace * weight) / totalWeight;
+    return totalColumnSpace / count;
   }, []);
 
   useEffect(() => {
@@ -210,8 +208,8 @@ export default function MillerColumns({
           {columns.map((col, idx) => (
             <Box key={`${idx}-${col.path}`} sx={{ display: "contents" }}>
               <Panel
-                defaultSize={getColumnDefaultSize(idx, columns.length)}
-                minSize={8}
+                defaultSize={getColumnDefaultSize(columns.length)}
+                minSize={12}
               >
                 <FileColumn
                   title={col.title}
@@ -223,7 +221,11 @@ export default function MillerColumns({
                 />
               </Panel>
               <PanelResizeHandle
-                style={{ width: 1, background: "rgba(0,0,0,0.12)" }}
+                style={{
+                  width: 6,
+                  cursor: "col-resize",
+                  background: "rgba(0,0,0,0.18)",
+                }}
               />
             </Box>
           ))}

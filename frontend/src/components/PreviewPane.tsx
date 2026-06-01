@@ -1,13 +1,18 @@
 import { useEffect, useState } from "react";
 import { Box, Stack, Typography } from "@mui/material";
-import { fetchFilePreviewMetadata, fetchPreviewBlob, type FilePreviewMetadata } from "@/api/altastata";
+import {
+  fetchFilePreviewMetadata,
+  fetchPreviewBlob,
+  fetchTextPreviewChunk,
+  type FilePreviewMetadata,
+} from "@/api/altastata";
 import type { FileEntry } from "@/types";
 
 interface Props {
   file: FileEntry | null;
 }
 
-const MAX_INLINE_TEXT_BYTES = 256 * 1024;
+const TEXT_PREVIEW_CHUNK_BYTES = 4 * 1024;
 const MAX_INLINE_TEXT_CHARS = 20_000;
 
 function formatBytes(n: number | null): string {
@@ -26,6 +31,7 @@ export default function PreviewPane({ file }: Props) {
   const [loading, setLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [metadata, setMetadata] = useState<FilePreviewMetadata | null>(null);
+  const [previewNotice, setPreviewNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (!file || file.is_dir) {
@@ -54,6 +60,7 @@ export default function PreviewPane({ file }: Props) {
       setTextPreview(null);
       setLoading(false);
       setPreviewError(null);
+      setPreviewNotice(null);
       return;
     }
     const isImage = file.mime_type?.startsWith("image/");
@@ -71,31 +78,24 @@ export default function PreviewPane({ file }: Props) {
     let objectUrl: string | null = null;
     setLoading(true);
     setPreviewError(null);
+    setPreviewNotice(null);
     setPreviewSrc(null);
     setTextPreview(null);
 
     void (async () => {
       try {
         if (isText) {
-          if (file.size != null && file.size > MAX_INLINE_TEXT_BYTES) {
-            if (!disposed) {
-              setPreviewError(
-                `Text preview is disabled for files larger than ${formatBytes(MAX_INLINE_TEXT_BYTES)}.`,
-              );
-            }
-            return;
+          const chunk = await fetchTextPreviewChunk(file.path, file.version, TEXT_PREVIEW_CHUNK_BYTES);
+          if (disposed) return;
+          setTextPreview(clampTextPreview(chunk.text));
+          if (chunk.truncated) {
+            setPreviewNotice(`Showing first ${formatBytes(chunk.bytesRead)} of this file.`);
           }
+          return;
         }
 
         const blob = await fetchPreviewBlob(file.path, file.version, file.mime_type);
         if (disposed) return;
-
-        if (isText) {
-          const text = await blob.text();
-          if (disposed) return;
-          setTextPreview(clampTextPreview(text));
-          return;
-        }
 
         objectUrl = URL.createObjectURL(blob);
         setPreviewSrc(objectUrl);
@@ -133,7 +133,10 @@ export default function PreviewPane({ file }: Props) {
   const isImage = file.mime_type?.startsWith("image/");
   const isPdf = file.mime_type === "application/pdf";
   const isText = file.mime_type?.startsWith("text/");
-  const resolvedSize = metadata?.size ?? file.size;
+  const resolvedSize = metadata?.size ?? file.size ?? null;
+  const sizeText = resolvedSize != null
+    ? formatBytes(resolvedSize)
+    : (metadata?.sizeRaw ?? "—");
   const resolvedReaders = metadata?.readers.length ? metadata.readers : file.readers;
 
   if (file.is_dir) {
@@ -187,19 +190,19 @@ export default function PreviewPane({ file }: Props) {
         </Typography>
         <Stack direction="row" spacing={1} sx={{ mt: 0.5 }}>
           <Typography variant="caption" color="text.secondary">
-            Size: {formatBytes(resolvedSize)}
+            Size: {sizeText}
           </Typography>
           {file.created && (
             <Typography variant="caption" color="text.secondary">
               | Created: {file.created}
             </Typography>
           )}
+          {metadata?.tag && (
+            <Typography variant="caption" color="text.secondary">
+              by {metadata.tag}
+            </Typography>
+          )}
         </Stack>
-        {metadata?.tag && (
-          <Typography variant="caption" color="text.secondary" display="block">
-            Tag: {metadata.tag}
-          </Typography>
-        )}
         {resolvedReaders.length > 0 && (
           <Typography variant="caption" color="text.secondary">
             Readers: {resolvedReaders.join(", ")}
@@ -219,6 +222,13 @@ export default function PreviewPane({ file }: Props) {
           <Box sx={{ p: 2 }}>
             <Typography variant="body2" color="error.main">
               {previewError}
+            </Typography>
+          </Box>
+        )}
+        {previewNotice && !loading && !previewError && (
+          <Box sx={{ px: 2, pt: 2 }}>
+            <Typography variant="caption" color="text.secondary">
+              {previewNotice}
             </Typography>
           </Box>
         )}

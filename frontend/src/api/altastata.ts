@@ -90,6 +90,15 @@ message CreateFileRequest {
   bytes content = 2;
 }
 message CreateFileResponse { FileStatus status = 1; }
+message GetBufferRequest {
+  string file_path = 1;
+  int64 snapshot_time = 2;
+  int64 start_position = 3;
+  int32 parallel_chunks = 4;
+  int32 size = 5;
+  bool trust_cached_size = 6;
+}
+message GetBufferResponse { bytes data = 1; }
 message DeleteRequest {
   string cloud_path_prefix = 1;
   bool including_subdirectories = 2;
@@ -279,11 +288,29 @@ function splitVersionedPath(cloudPath: string): { base: string; version: string 
   return { base: cloudPath.slice(0, idx), version: cloudPath.slice(idx + 1) || null };
 }
 
-function parseCreated(version: string | null): string | null {
+function parseVersionTimestamp(version: string | null): number | null {
   if (!version) return null;
-  const ts = version.split("_", 1)[0];
-  if (!/^\d+$/.test(ts)) return null;
-  const dt = new Date(Number(ts));
+  const parts = version.split("_");
+  if (parts.length >= 2) {
+    const ts = Number(parts[1]);
+    if (!Number.isNaN(ts)) return ts;
+  }
+  const legacyTs = Number(parts[0]);
+  if (!Number.isNaN(legacyTs)) return legacyTs;
+  return null;
+}
+
+function parseVersionTag(version: string | null): string | null {
+  if (!version) return null;
+  const parts = version.split("_");
+  if (parts.length >= 2 && parts[0]) return parts[0];
+  return null;
+}
+
+function parseCreated(version: string | null): string | null {
+  const ts = parseVersionTimestamp(version);
+  if (ts == null) return null;
+  const dt = new Date(ts);
   if (Number.isNaN(dt.getTime())) return null;
   const yyyy = dt.getFullYear();
   const mm = String(dt.getMonth() + 1).padStart(2, "0");
@@ -301,6 +328,7 @@ function guessMime(name: string): string | null {
   if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
   if (lower.endsWith(".gif")) return "image/gif";
   if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".csv")) return "text/csv";
   if (lower.endsWith(".txt") || lower.endsWith(".md") || lower.endsWith(".log")) return "text/plain";
   return null;
 }
@@ -521,11 +549,15 @@ async function withBootstrapRetry<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-async function getAttributes(filePath: string, names: string[]): Promise<Record<string, string>> {
+async function getAttributes(
+  filePath: string,
+  names: string[],
+  snapshotTime = 0,
+): Promise<Record<string, string>> {
   const resp = await grpcUnary(
     "altastata.v1.AttributesService/GetAttributes",
     "GetAttributesRequest",
-    { filePath, snapshotTime: 0, names },
+    { filePath, snapshotTime, names },
     "AttributeMap",
     true,
   );
@@ -705,8 +737,54 @@ export async function fetchPreviewBlob(
   }
 }
 
+export interface TextPreviewChunk {
+  text: string;
+  bytesRead: number;
+  truncated: boolean;
+}
+
+export async function fetchTextPreviewChunk(
+  path: string,
+  version: string | null,
+  maxBytes = 4 * 1024,
+): Promise<TextPreviewChunk> {
+  try {
+    await maybeBootstrap();
+    const cloudPath = toCloudPath(path);
+    const versionedPath = version ? `${cloudPath}✹${version}` : cloudPath;
+    const resp = await withBootstrapRetry(() => grpcUnary(
+      "altastata.v1.FileOpsService/GetBuffer",
+      "GetBufferRequest",
+      {
+        filePath: versionedPath,
+        snapshotTime: 0,
+        startPosition: 0,
+        parallelChunks: 1,
+        size: maxBytes,
+        trustCachedSize: true,
+      },
+      "GetBufferResponse",
+      true,
+      15_000,
+    ));
+    const raw = resp.data;
+    let firstChunk = new Uint8Array(0);
+    if (raw instanceof Uint8Array) firstChunk = new Uint8Array(raw);
+    else if (Array.isArray(raw)) firstChunk = new Uint8Array(raw as number[]);
+
+    return {
+      text: new TextDecoder().decode(firstChunk),
+      bytesRead: firstChunk.length,
+      truncated: firstChunk.length >= maxBytes,
+    };
+  } catch (error) {
+    throw authHint(error);
+  }
+}
+
 export interface FilePreviewMetadata {
   size: number | null;
+  sizeRaw: string | null;
   tag: string | null;
   readers: string[];
 }
@@ -718,15 +796,17 @@ export async function fetchFilePreviewMetadata(
   try {
     await maybeBootstrap();
     const cloudPath = toCloudPath(path);
-    const versionedPath = version ? `${cloudPath}✹${version}` : cloudPath;
-    const attrs = await withBootstrapRetry(() => getAttributes(versionedPath, ["size", "tag", "readers"]));
-    const size = attrs.size && /^\d+$/.test(attrs.size) ? Number(attrs.size) : null;
-    const tag = attrs.tag?.trim() ? attrs.tag.trim() : null;
+    const snapshotTime = parseVersionTimestamp(version) ?? 0;
+    const attrs = await withBootstrapRetry(() => getAttributes(cloudPath, ["size", "readers"], snapshotTime));
+    const normalizedSize = (attrs.size ?? "").replace(/,/g, "").trim();
+    const size = normalizedSize && /^\d+$/.test(normalizedSize) ? Number(normalizedSize) : null;
+    const sizeRaw = attrs.size?.trim() ? attrs.size.trim() : null;
+    const tag = parseVersionTag(version);
     const readersRaw = attrs.readers?.trim() ?? "";
     const readers = readersRaw
-      ? readersRaw.split(",").map((item) => item.trim()).filter(Boolean)
+      ? readersRaw.split(/[;,\n]/).map((item) => item.trim()).filter(Boolean)
       : [];
-    return { size, tag, readers };
+    return { size, sizeRaw, tag, readers };
   } catch (error) {
     throw authHint(error);
   }
