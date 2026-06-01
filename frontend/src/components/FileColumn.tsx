@@ -8,6 +8,14 @@ import {
 import FolderIcon from "@mui/icons-material/Folder";
 import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFile";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import ImageIcon from "@mui/icons-material/Image";
+import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
+import DescriptionIcon from "@mui/icons-material/Description";
+import TableChartIcon from "@mui/icons-material/TableChart";
+import ArchiveIcon from "@mui/icons-material/Archive";
+import CodeIcon from "@mui/icons-material/Code";
+import MovieIcon from "@mui/icons-material/Movie";
+import AudioFileIcon from "@mui/icons-material/AudioFile";
 import type { FileEntry } from "@/types";
 
 interface Props {
@@ -17,6 +25,45 @@ interface Props {
   selected: FileEntry | null;
   onActivate: () => void;
   onSelect: (entry: FileEntry) => void;
+}
+
+function ext(name: string): string {
+  const idx = name.lastIndexOf(".");
+  if (idx < 0 || idx === name.length - 1) return "";
+  return name.slice(idx + 1).toLowerCase();
+}
+
+function fileIcon(entry: FileEntry) {
+  if (entry.is_dir) return <FolderIcon fontSize="small" sx={{ color: "#1976d2" }} />;
+
+  const mime = entry.mime_type?.toLowerCase() ?? "";
+  const extension = ext(entry.name);
+
+  if (mime.startsWith("image/") || ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"].includes(extension)) {
+    return <ImageIcon fontSize="small" sx={{ color: "success.main" }} />;
+  }
+  if (mime === "application/pdf" || extension === "pdf") {
+    return <PictureAsPdfIcon fontSize="small" sx={{ color: "error.main" }} />;
+  }
+  if (mime.startsWith("text/") || ["txt", "md", "log", "rtf"].includes(extension)) {
+    return <DescriptionIcon fontSize="small" sx={{ color: "text.secondary" }} />;
+  }
+  if (mime === "text/csv" || ["csv", "tsv", "xlsx", "xls"].includes(extension)) {
+    return <TableChartIcon fontSize="small" sx={{ color: "success.dark" }} />;
+  }
+  if (["json", "xml", "yaml", "yml", "ts", "tsx", "js", "jsx", "java", "py", "go", "sql", "sh", "css", "html"].includes(extension)) {
+    return <CodeIcon fontSize="small" sx={{ color: "secondary.main" }} />;
+  }
+  if (["zip", "rar", "7z", "tar", "gz", "tgz", "bz2"].includes(extension)) {
+    return <ArchiveIcon fontSize="small" sx={{ color: "warning.main" }} />;
+  }
+  if (mime.startsWith("video/") || ["mp4", "mov", "avi", "mkv", "webm"].includes(extension)) {
+    return <MovieIcon fontSize="small" sx={{ color: "primary.main" }} />;
+  }
+  if (mime.startsWith("audio/") || ["mp3", "wav", "ogg", "flac", "m4a"].includes(extension)) {
+    return <AudioFileIcon fontSize="small" sx={{ color: "primary.main" }} />;
+  }
+  return <InsertDriveFileIcon fontSize="small" />;
 }
 
 export default function FileColumn({
@@ -74,11 +121,7 @@ export default function FileColumn({
               sx={{ pr: 0.5 }}
             >
               <ListItemIcon sx={{ minWidth: 28 }}>
-                {entry.is_dir ? (
-                  <FolderIcon fontSize="small" sx={{ color: "#1976d2" }} />
-                ) : (
-                  <InsertDriveFileIcon fontSize="small" />
-                )}
+                {fileIcon(entry)}
               </ListItemIcon>
               <ListItemText
                 primary={entry.name}
