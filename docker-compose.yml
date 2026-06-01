@@ -1,0 +1,19 @@
+# Local development: spin up the backend in a container and run Vite on
+# the host. Use `npm run dev` in ./frontend to hit the API.
+#
+# For full prod-like single-container test, build the root Dockerfile and run.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: altastata-console:dev
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount your altastata account dir so the container can talk to cloud
+      - ${HOME}/.altastata:/root/.altastata:ro
+    environment:
+      - ALTASTATA_ACCOUNT_DIR=/root/.altastata/accounts/amazon.rsa.bob123

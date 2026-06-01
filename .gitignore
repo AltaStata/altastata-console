@@ -1,0 +1,35 @@
+# Node
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+*.log
+npm-debug.log*
+
+# Local TS build artifacts
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Docker
+*.tar
