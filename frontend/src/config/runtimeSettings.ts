@@ -9,6 +9,8 @@ export interface RuntimeSettings {
   bootstrapMode: string;
 }
 
+type StoredRuntimeSettings = Omit<RuntimeSettings, "accountPassword">;
+
 const STORAGE_KEY = "altastata-console-runtime-settings-v1";
 
 export function extractMyUserFromProperties(text: string): string {
@@ -39,7 +41,8 @@ function envDefaults(): RuntimeSettings {
       || configuredUserName
       || configuredAccountId.split(".").at(-1)
       || "",
-    accountPassword: (import.meta.env.VITE_ALTASTATA_PASSWORD as string | undefined) ?? "",
+    // Security default: password is always entered manually per session.
+    accountPassword: "",
     userProperties: configuredUserProperties,
     privateKey: ((import.meta.env.VITE_ALTASTATA_PRIVATE_KEY as string | undefined) ?? "")
       .replace(/\\n/g, "\n"),
@@ -73,8 +76,10 @@ function loadInitialSettings(): RuntimeSettings {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return defaults;
-    const parsed = JSON.parse(raw) as Partial<RuntimeSettings>;
-    return normalizeSettings(parsed, defaults);
+    const parsedRaw = JSON.parse(raw) as Partial<RuntimeSettings>;
+    // Legacy localStorage data may contain accountPassword; ignore it on load.
+    const { accountPassword: _ignored, ...parsed } = parsedRaw;
+    return normalizeSettings(parsed as Partial<StoredRuntimeSettings>, defaults);
   } catch {
     return defaults;
   }
@@ -85,7 +90,8 @@ let runtimeSettings: RuntimeSettings = loadInitialSettings();
 function persistSettings(settings: RuntimeSettings): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    const { accountPassword: _ignored, ...persisted } = settings;
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
   } catch {
     // Ignore storage failures (quota/private mode); keep in-memory settings.
   }
