@@ -32,7 +32,7 @@ import BottomToolbar from "@/components/BottomToolbar";
 export default function App() {
   const [account, setAccount] = useState<AccountInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selectedEntry, setSelectedEntry] = useState<FileEntry | null>(null);
+  const [selectedEntries, setSelectedEntries] = useState<FileEntry[]>([]);
   const [activePath, setActivePath] = useState("/");
   const [reloadToken, setReloadToken] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -141,8 +141,8 @@ export default function App() {
       <Box sx={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
         <MillerColumns
           reloadToken={reloadToken}
-          onSelectionContextChange={(selected, currentPath) => {
-            setSelectedEntry(selected);
+          onSelectionContextChange={(entries, currentPath) => {
+            setSelectedEntries(entries);
             setActivePath(currentPath);
           }}
           onOpenSettings={openSettings}
@@ -150,7 +150,7 @@ export default function App() {
       </Box>
 
       <BottomToolbar
-        selectedEntry={selectedEntry}
+        selectedEntries={selectedEntries}
         activePath={activePath}
         onRefresh={() => setReloadToken((prev) => prev + 1)}
       />

@@ -22,9 +22,9 @@ interface Props {
   title: string;
   isActive: boolean;
   entries: FileEntry[];
-  selected: FileEntry | null;
+  selectedPaths: Set<string>;
   onActivate: () => void;
-  onSelect: (entry: FileEntry) => void;
+  onSelect: (entry: FileEntry, modifiers: { ctrl: boolean; shift: boolean }) => void;
 }
 
 function ext(name: string): string {
@@ -70,7 +70,7 @@ export default function FileColumn({
   title,
   isActive,
   entries,
-  selected,
+  selectedPaths,
   onActivate,
   onSelect,
 }: Props) {
@@ -109,16 +109,19 @@ export default function FileColumn({
       </Box>
       <List dense disablePadding sx={{ flex: 1, overflow: "auto" }}>
         {entries.map((entry) => {
-          const isSelected = selected?.path === entry.path;
+          const isSelected = selectedPaths.has(entry.path);
           return (
             <ListItemButton
               key={entry.path}
               selected={isSelected}
-              onClick={() => {
+              onClick={(event) => {
                 onActivate();
-                onSelect(entry);
+                onSelect(entry, {
+                  ctrl: event.ctrlKey || event.metaKey,
+                  shift: event.shiftKey,
+                });
               }}
-              sx={{ pr: 0.5 }}
+              sx={{ pr: 0.5, userSelect: "none" }}
             >
               <ListItemIcon sx={{ minWidth: 28 }}>
                 {fileIcon(entry)}

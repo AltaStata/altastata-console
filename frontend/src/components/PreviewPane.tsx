@@ -66,7 +66,9 @@ export default function PreviewPane({ file }: Props) {
     const isImage = file.mime_type?.startsWith("image/");
     const isPdf = file.mime_type === "application/pdf";
     const isText = file.mime_type?.startsWith("text/");
-    if (!isImage && !isPdf && !isText) {
+    const isVideo = file.mime_type?.startsWith("video/");
+    const isAudio = file.mime_type?.startsWith("audio/");
+    if (!isImage && !isPdf && !isText && !isVideo && !isAudio) {
       setPreviewSrc(null);
       setTextPreview(null);
       setLoading(false);
@@ -133,6 +135,8 @@ export default function PreviewPane({ file }: Props) {
   const isImage = file.mime_type?.startsWith("image/");
   const isPdf = file.mime_type === "application/pdf";
   const isText = file.mime_type?.startsWith("text/");
+  const isVideo = file.mime_type?.startsWith("video/");
+  const isAudio = file.mime_type?.startsWith("audio/");
   const resolvedSize = metadata?.size ?? file.size ?? null;
   const sizeText = resolvedSize != null
     ? formatBytes(resolvedSize)
@@ -246,6 +250,25 @@ export default function PreviewPane({ file }: Props) {
             style={{ width: "100%", height: "100%", border: 0 }}
           />
         )}
+        {isVideo && previewSrc && !loading && !previewError && (
+          <Box sx={{ p: 2, display: "flex", justifyContent: "center" }}>
+            <video
+              src={previewSrc}
+              controls
+              preload="metadata"
+              style={{ maxWidth: "100%", maxHeight: "100%", outline: "none" }}
+            >
+              Your browser cannot play this video.
+            </video>
+          </Box>
+        )}
+        {isAudio && previewSrc && !loading && !previewError && (
+          <Box sx={{ p: 2 }}>
+            <audio src={previewSrc} controls preload="metadata" style={{ width: "100%" }}>
+              Your browser cannot play this audio file.
+            </audio>
+          </Box>
+        )}
         {isText && !loading && !previewError && (
           <Box sx={{ p: 2 }}>
             <Typography
@@ -262,7 +285,7 @@ export default function PreviewPane({ file }: Props) {
             </Typography>
           </Box>
         )}
-        {!loading && !previewError && !isImage && !isPdf && !isText && (
+        {!loading && !previewError && !isImage && !isPdf && !isText && !isVideo && !isAudio && (
           <Box sx={{ p: 2 }}>
             <Typography variant="body2" color="text.secondary">
               No inline preview for {file.mime_type ?? "this file type"}.

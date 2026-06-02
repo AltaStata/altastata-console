@@ -295,9 +295,58 @@ function guessMime(name: string): string | null {
   if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
   if (lower.endsWith(".gif")) return "image/gif";
   if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".svg")) return "image/svg+xml";
+  if (lower.endsWith(".mp4") || lower.endsWith(".m4v")) return "video/mp4";
+  if (lower.endsWith(".mov")) return "video/quicktime";
+  if (lower.endsWith(".webm")) return "video/webm";
+  if (lower.endsWith(".ogv")) return "video/ogg";
+  if (lower.endsWith(".mp3")) return "audio/mpeg";
+  if (lower.endsWith(".wav")) return "audio/wav";
+  if (lower.endsWith(".ogg") || lower.endsWith(".oga")) return "audio/ogg";
+  if (lower.endsWith(".m4a")) return "audio/mp4";
   if (lower.endsWith(".csv")) return "text/csv";
   if (lower.endsWith(".txt") || lower.endsWith(".md") || lower.endsWith(".log")) return "text/plain";
   return null;
+}
+
+/**
+ * Run async `worker` over `items` with bounded concurrency. The first failure
+ * cancels future task starts, in-flight workers continue but no new ones are
+ * spawned, and the original error is rethrown after all started workers have
+ * settled. Used by the folder upload flow to overlap CreateFile RPCs while
+ * preserving the existing "stop on first error" semantics.
+ */
+export async function runWithConcurrency<T>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) return;
+  const cap = Math.max(1, Math.min(limit, items.length));
+  let nextIndex = 0;
+  let aborted = false;
+  let firstError: unknown = null;
+  const runners: Promise<void>[] = [];
+  for (let i = 0; i < cap; i += 1) {
+    runners.push((async () => {
+      while (!aborted) {
+        const idx = nextIndex;
+        nextIndex += 1;
+        if (idx >= items.length) return;
+        try {
+          await worker(items[idx], idx);
+        } catch (error) {
+          if (!aborted) {
+            aborted = true;
+            firstError = error;
+          }
+          return;
+        }
+      }
+    })());
+  }
+  await Promise.all(runners);
+  if (firstError) throw firstError;
 }
 
 let authBootstrapDone = false;
@@ -1076,4 +1125,47 @@ export function resolveUploadTargetPath(
   }
   const baseDir = selectedEntry ? parentPath(selectedEntry.path) : normalizePath(activePath);
   return `${normalizePath(baseDir)}/${fileName}`.replace("//", "/");
+}
+
+/**
+ * Returns `name` if it is not present in `used`, otherwise appends a numeric
+ * suffix before the extension (e.g. `report (2).pdf`) until it is unique.
+ * Mutates `used` to claim the resulting name.
+ */
+export function makeUniqueArchiveName(name: string, used: Set<string>): string {
+  if (!used.has(name)) {
+    used.add(name);
+    return name;
+  }
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let i = 2; i < 10_000; i += 1) {
+    const candidate = `${stem} (${i})${ext}`;
+    if (!used.has(candidate)) {
+      used.add(candidate);
+      return candidate;
+    }
+  }
+  // Pathological fallback — should never happen in practice.
+  const fallback = `${stem}-${Date.now()}${ext}`;
+  used.add(fallback);
+  return fallback;
+}
+
+/**
+ * Suggests a name for a multi-item ZIP archive. If every selected entry
+ * shares the same parent directory (and that parent is not root), the parent
+ * name is reused; otherwise a generic fallback is returned.
+ */
+export function suggestMultiZipName(entries: ReadonlyArray<{ path: string }>): string {
+  if (entries.length === 0) return "altastata-download.zip";
+  const parents = entries.map((e) => parentPath(e.path));
+  const first = parents[0];
+  const allSame = parents.every((p) => p === first);
+  if (allSame && first && first !== "/") {
+    const last = first.split("/").filter(Boolean).pop();
+    if (last) return `${last}.zip`;
+  }
+  return `altastata-download-${entries.length}-items.zip`;
 }
