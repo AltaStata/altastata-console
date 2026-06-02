@@ -35,9 +35,6 @@ altastata-console/
 │       ├── api/altastata.ts        ← typed API client (gRPC-Web)
 │       ├── theme/index.ts          ← MUI theme matching JavaFX look
 │       └── types/index.ts          ← shared TS types
-├── nginx/default.conf  ← SPA + history-API fallback for prod image
-├── Dockerfile          ← multi-stage: `dist` (bundle only) and
-│                         `runtime` (nginx serving the bundle)
 └── docs/architecture.md
 ```
 
@@ -120,41 +117,29 @@ ALLOW_SECRETS_COMMIT=1 git commit -m "..."
 
 ## Production build
 
-The `Dockerfile` is a multi-stage build with two targets you can use
-independently.
-
-### Standalone nginx image (default)
-
-Builds the React bundle and ships it inside a small `nginx:alpine`
-image that serves the SPA on port 8080:
-
 ```bash
-docker build -t altastata-console:latest .
-docker run --rm -p 8080:8080 altastata-console:latest
+cd frontend
+npm install
+npm run build   # → frontend/dist/
 ```
 
-Then open <http://localhost:8080>. The image is stateless — no
-credentials are baked in. The Java gRPC URL and account info are
-entered at runtime from the Settings dialog (see Quick start above).
+`frontend/dist/` is the only artifact this repo produces. It is a
+static SPA that talks to `altastata-grpc` directly via gRPC-Web; no
+Python, FastAPI, or Node runtime is required at runtime.
 
-### Embedding into another image
+### Distribution
 
-If you want to host the UI inside another image (for example a
-Jupyter image, or a service that already exposes its own web port),
-build only the `dist` stage and copy the bundle out:
+The bundle ships inside the [`altastata` Python package][pyalt] under
+`altastata/lib/altastata-console-static/`. Any image that already
+includes `altastata` therefore already includes the UI, and the Java
+gRPC server (`mycloud/altastata-grpc`) serves those static files
+directly on `:9877` — no separate web container is needed.
 
-```bash
-docker build --target dist -t altastata-console:dist .
-```
+[pyalt]: https://github.com/SergeVil/altastata-python-package
 
-Then in the consumer Dockerfile:
-
-```dockerfile
-COPY --from=altastata-console:dist /app/dist /usr/share/jupyter/altastata-ui
-```
-
-That way the same source produces both a self-contained image and an
-embeddable static bundle, with no Python or FastAPI runtime.
+To refresh the bundle in the Python package, copy `frontend/dist/`
+into `altastata-python-package/altastata/lib/altastata-console-static/`
+and commit there. There is no Docker step in this repo.
 
 ## Why a separate repo?
 

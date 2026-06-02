@@ -68,18 +68,22 @@ The frontend currently mirrors JavaFX behavior:
 ## Deployment
 
 The repo produces a single artifact: the React SPA in `frontend/dist`.
-There is no Python adapter and no backend service — the browser talks
-to `altastata-grpc` directly via gRPC-Web.
+There is no Python adapter, no backend service, and no Docker image
+in this repo — the browser talks to `altastata-grpc` directly via
+gRPC-Web.
 
-The multi-stage `Dockerfile` exposes two build targets:
+The bundle is distributed through the `altastata` Python package
+under `altastata/lib/altastata-console-static/`. Any image or
+environment that installs `altastata` (pip / Jupyter / mycloud
+containers) automatically gets the UI bytes alongside the library.
 
-- `dist` — Node stage that runs `npm run build` and leaves the bundle
-  in `/app/dist`. Use this target when embedding the UI inside another
-  image (e.g. a Jupyter image) via `COPY --from=...`.
-- `runtime` — Default target. `nginx:alpine` serving the bundle on
-  port 8080 with SPA history-API fallback (`nginx/default.conf`). The
-  port is unprivileged so the image runs under arbitrary non-root UIDs
-  on OpenShift/Kubernetes without extra capabilities.
+In production, the Java gRPC server (`mycloud/altastata-grpc`) serves
+those static files directly from the classpath / package directory
+on `:9877` — both gRPC API and SPA come from the same origin and
+port, so CORS is a non-issue and there is no separate web server to
+operate.
 
-Both stages build from the same source, so embedded and standalone
-deployments stay in sync automatically.
+To refresh the bundle, run `npm run build` here and copy
+`frontend/dist/` into the corresponding folder of
+`altastata-python-package`. The release of the Python package then
+carries the updated UI.
