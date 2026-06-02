@@ -31,8 +31,10 @@ altastata-console/
 │       │   ├── MillerColumns.tsx   ← Finder-style 3-pane layout
 │       │   ├── FileColumn.tsx      ← single column of files/folders
 │       │   ├── PreviewPane.tsx     ← right pane: preview + metadata
-│       │   └── BottomToolbar.tsx   ← upload/download/share/lock/...
-│       ├── api/altastata.ts        ← typed API client (gRPC-Web)
+│       │   ├── BottomToolbar.tsx   ← upload/download/share/lock/...
+│       │   └── LogDialog.tsx       ← in-app UI-log panel
+│       ├── utils/logBuffer.ts      ← console.* ring buffer for LogDialog
+│       ├── api/altastata.ts        ← typed API client (gRPC-Web), events
 │       ├── theme/index.ts          ← MUI theme matching JavaFX look
 │       └── types/index.ts          ← shared TS types
 ├── scripts/
@@ -71,6 +73,29 @@ Then use **Save & Run Bootstrap** to run:
 3. `SetPasswordForUser`
 
 This is now the preferred flow for local development.
+
+The Settings dialog header also shows the bundle's build version and ISO
+timestamp (baked in at build time via Vite `define`) so it is unambiguous
+which dist the browser is serving — handy when chasing cache-busting issues.
+
+### Live updates (events)
+
+While the UI is open it keeps a long-running gRPC server-streaming call to
+`altastata.v1.EventsService/Subscribe`. The Java backend forwards
+`SecureCloudEventProcessor` notifications (`SHARE` when another user shares
+a file with the current user, `DELETE` when access is revoked or a shared
+file is deleted) and the UI auto-refreshes the current view so the file list
+never goes stale. The stream auto-reconnects on transient failures, and a
+follow-up refresh is scheduled ~7s after every event to absorb the gap
+between the event dispatch and the backend's "Finishing shot" finalisation.
+
+### UI log panel
+
+The terminal icon next to the settings button opens a "UI log" dialog
+showing recent `console.*` output captured by an in-app ring buffer
+(`frontend/src/utils/logBuffer.ts`). It's intended for debugging gRPC /
+auth issues without forcing the user to open browser DevTools, and shows
+the same lines that appear in the real console.
 
 You can still prefill defaults via `frontend/.env.local` (safe placeholders only):
 

@@ -30,6 +30,8 @@ column to the right. Clicking a file replaces the right-most preview pane.
 | bottom action bar | `frontend/src/components/BottomToolbar.tsx` |
 | native window title (account) | `frontend/src/App.tsx` `<AppBar>` |
 | account settings dialog | `frontend/src/App.tsx` `<Dialog>` |
+| event listeners on `AltaStataFileSystem` | `subscribeToAltaStataEvents` in `frontend/src/api/altastata.ts` |
+| status bar / log inspector | `frontend/src/components/LogDialog.tsx` (terminal icon) |
 
 ## Runtime data path
 
@@ -37,9 +39,10 @@ column to the right. Clicking a file replaces the right-most preview pane.
 React (Vite dev / static build)
   └─ grpc-web calls from `frontend/src/api/altastata.ts`
       ├─ UsersService       (bootstrap/password)
-      ├─ FileOpsService     (list/getBuffer/read/upload/delete)
+      ├─ FileOpsService     (list/getBuffer/read/upload/delete, zip stream)
       ├─ AttributesService  (size/readers metadata)
-      └─ SharingService     (share/revoke)
+      ├─ SharingService     (share/revoke)
+      └─ EventsService      (long-running Subscribe stream → SHARE/DELETE)
             │
             ▼
       altastata-grpc :9877 (Java)
@@ -57,6 +60,8 @@ The frontend currently mirrors JavaFX behavior:
 | CSV preview | treated as text (`text/csv`) |
 | Preview metadata | `GetAttributes` (`size`, `readers`) + version tag parsing |
 | User derivation | `myuser` from user properties (JavaFX-compatible) |
+| Live updates on `SHARE` / `DELETE` | `EventsService.Subscribe` server stream + ~7s follow-up `listDir` to absorb backend's "Finishing shot" lag |
+| Self-healing auth | `withBootstrapRetry` — on `status=16`/`status=9`/"User is not initialized" the client transparently re-runs the bootstrap sequence and retries the call once |
 
 ## Runtime settings and secrets
 
