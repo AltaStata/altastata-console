@@ -48,6 +48,19 @@ import type { FileEntry } from "@/types";
 interface Props {
   selectedEntries: FileEntry[];
   activePath: string;
+  /**
+   * Full paths of folders the user has just created locally and that are
+   * not yet backed by any file in the cloud. We need this here only so the
+   * New Folder dialog can warn on duplicates BEFORE adding another pending
+   * entry; the actual merge into the column listing happens in App.tsx /
+   * MillerColumns.
+   */
+  pendingFolderPaths?: Set<string>;
+  /**
+   * Owner-supplied callback that registers a new pending folder. Receives
+   * the FULL absolute path (e.g. `/foo/new-dir`).
+   */
+  onAddPendingFolder?: (fullPath: string) => void;
   onRefresh: () => void;
 }
 
@@ -69,15 +82,66 @@ type SavePickerWindow = Window & {
   }) => Promise<SaveFileHandle>;
 };
 
-export default function BottomToolbar({ selectedEntries, activePath, onRefresh }: Props) {
+export default function BottomToolbar({
+  selectedEntries,
+  activePath,
+  pendingFolderPaths,
+  onAddPendingFolder,
+  onRefresh,
+}: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string>("Ready");
   const [filterText, setFilterText] = useState("");
+  const [newFolderDialog, setNewFolderDialog] = useState<
+    { name: string; error: string | null } | null
+  >(null);
 
   const selectionCount = selectedEntries.length;
   const singleSelection: FileEntry | null = selectionCount === 1 ? selectedEntries[0] : null;
+
+  const openNewFolderDialog = () => {
+    setNewFolderDialog({ name: "", error: null });
+  };
+
+  const closeNewFolderDialog = () => {
+    setNewFolderDialog(null);
+  };
+
+  const submitNewFolderDialog = () => {
+    if (!newFolderDialog || !onAddPendingFolder) return;
+    const raw = newFolderDialog.name.trim();
+    if (!raw) {
+      setNewFolderDialog({ ...newFolderDialog, error: "Enter a folder name." });
+      return;
+    }
+    if (raw.includes("/") || raw.includes("\\")) {
+      setNewFolderDialog({
+        ...newFolderDialog,
+        error: "Slashes are not allowed in a folder name.",
+      });
+      return;
+    }
+    if (raw === "." || raw === "..") {
+      setNewFolderDialog({ ...newFolderDialog, error: "Reserved name." });
+      return;
+    }
+    // Compose the full absolute path. `activePath` is `/` for root or
+    // `/foo/bar` for a nested folder; we just append `/<name>`. Mirrors how
+    // altastata-ui builds parentDirAbsolutePath + "/" + name.
+    const fullPath = activePath === "/" ? `/${raw}` : `${activePath}/${raw}`;
+    if (pendingFolderPaths?.has(fullPath)) {
+      setNewFolderDialog({
+        ...newFolderDialog,
+        error: "A folder with that name already exists here.",
+      });
+      return;
+    }
+    onAddPendingFolder(fullPath);
+    setStatus(`Created (pending) ${fullPath}`);
+    setNewFolderDialog(null);
+  };
   // Upload always targets a single context: the lone selection or the active dir.
   const uploadAnchor = singleSelection;
 
@@ -459,10 +523,20 @@ export default function BottomToolbar({ selectedEntries, activePath, onRefresh }
       }}
     >
       <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", minWidth: 0 }}>
-        <Tooltip title="New folder">
+        <Tooltip
+          title={
+            onAddPendingFolder
+              ? "New folder (lives only in this browser session until you upload a file into it)"
+              : "New folder"
+          }
+        >
           <span>
-            <IconButton size="small" disabled>
-            <CreateNewFolderIcon fontSize="small" />
+            <IconButton
+              size="small"
+              disabled={busy || !onAddPendingFolder}
+              onClick={openNewFolderDialog}
+            >
+              <CreateNewFolderIcon fontSize="small" />
             </IconButton>
           </span>
         </Tooltip>
@@ -617,6 +691,64 @@ export default function BottomToolbar({ selectedEntries, activePath, onRefresh }
         style={{ display: "none" }}
         onChange={(e) => void handleUploadFolderSelected(e)}
       />
+
+      <Dialog
+        open={newFolderDialog !== null}
+        onClose={closeNewFolderDialog}
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle sx={{ pb: 1 }}>New folder</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={1.5} sx={{ mt: 0.5 }}>
+            <Typography variant="body2" color="text.secondary">
+              Inside: {activePath}
+            </Typography>
+            <TextField
+              autoFocus
+              size="small"
+              label="Folder name"
+              placeholder="my-folder"
+              value={newFolderDialog?.name ?? ""}
+              onChange={(e) => {
+                if (!newFolderDialog) return;
+                setNewFolderDialog({
+                  ...newFolderDialog,
+                  name: e.target.value,
+                  error: null,
+                });
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  submitNewFolderDialog();
+                }
+              }}
+              fullWidth
+            />
+            <Typography variant="caption" color="text.secondary">
+              The folder is local to this browser session until you upload a
+              file into it. AltaStata stores files keyed by path prefix, so an
+              empty folder has no on-cloud representation.
+            </Typography>
+            {newFolderDialog?.error && (
+              <Typography variant="caption" color="error.main">
+                {newFolderDialog.error}
+              </Typography>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeNewFolderDialog}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={submitNewFolderDialog}
+            disabled={!newFolderDialog?.name.trim()}
+          >
+            Create
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Dialog
         open={accessDialog !== null}

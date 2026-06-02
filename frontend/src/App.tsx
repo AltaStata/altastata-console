@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Alert,
   AppBar,
@@ -49,11 +49,52 @@ export default function App() {
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
+  // Client-only "pending" folders. AltaStata stores files keyed by `/`-separated
+  // prefixes, so a folder is just the implicit parent of one or more files.
+  // Until the user uploads a file into a freshly-created folder, that folder
+  // does not exist in the cloud at all -- mirroring `altastata-ui` (JavaFX)
+  // which calls `addCloudFileInUploadingProcess` to keep the new directory
+  // visible in the navigation pane without a backend call. We track the same
+  // thing here as a flat set of full paths, e.g. `Set { "/foo", "/foo/bar" }`.
+  // The `MillerColumns` view merges these into the listing for the matching
+  // parent column, and they are pruned automatically on a refresh once the
+  // backend's listing contains a real folder with the same path.
+  const [pendingFolderPaths, setPendingFolderPaths] = useState<Set<string>>(
+    () => new Set(),
+  );
 
   useEffect(() => {
     getAccount()
       .then(setAccount)
       .catch((e) => setError(String(e)));
+  }, []);
+
+  const addPendingFolder = useCallback((fullPath: string) => {
+    setPendingFolderPaths((prev) => {
+      if (prev.has(fullPath)) return prev;
+      const next = new Set(prev);
+      next.add(fullPath);
+      return next;
+    });
+  }, []);
+
+  // When MillerColumns reloads the backend listing and now sees a real folder
+  // with the same path as one of our pending entries, drop the pending one so
+  // the entry list stays clean (no duplicate icon for the same folder, no
+  // ghost left behind when the user later deletes the folder).
+  const reconcilePendingFolders = useCallback((realFolderPaths: Set<string>) => {
+    setPendingFolderPaths((prev) => {
+      let mutated = false;
+      const next = new Set<string>();
+      for (const p of prev) {
+        if (realFolderPaths.has(p)) {
+          mutated = true;
+          continue;
+        }
+        next.add(p);
+      }
+      return mutated ? next : prev;
+    });
   }, []);
 
   // Long-lived subscription to AltaStata events. The backend fires `SHARE`
@@ -231,6 +272,8 @@ export default function App() {
       <Box sx={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
         <MillerColumns
           reloadToken={reloadToken}
+          pendingFolderPaths={pendingFolderPaths}
+          onRealFolderPaths={reconcilePendingFolders}
           onSelectionContextChange={(entries, currentPath) => {
             setSelectedEntries(entries);
             setActivePath(currentPath);
@@ -242,6 +285,8 @@ export default function App() {
       <BottomToolbar
         selectedEntries={selectedEntries}
         activePath={activePath}
+        pendingFolderPaths={pendingFolderPaths}
+        onAddPendingFolder={addPendingFolder}
         onRefresh={() => setReloadToken((prev) => prev + 1)}
       />
 

@@ -27,6 +27,21 @@ interface SelectOptions {
 
 interface Props {
   reloadToken?: number;
+  /**
+   * Client-only "virtual" folders that the user has just created via the
+   * New Folder button. Keys are full paths (e.g. `/foo/bar`). MillerColumns
+   * merges these into each column whose `path` is the parent of a pending
+   * entry, so the user sees the folder appear right after creating it even
+   * though it does not yet exist in the cloud listing.
+   */
+  pendingFolderPaths?: Set<string>;
+  /**
+   * Called after each backend listing refresh with the set of folder paths
+   * that the backend ACTUALLY returned. The owner uses this to drop pending
+   * entries that have since become real (e.g. because the user uploaded a
+   * file into them).
+   */
+  onRealFolderPaths?: (realFolderPaths: Set<string>) => void;
   onSelectionContextChange?: (selectedEntries: FileEntry[], activePath: string) => void;
   onOpenSettings?: () => void;
 }
@@ -42,6 +57,8 @@ interface Props {
  */
 export default function MillerColumns({
   reloadToken = 0,
+  pendingFolderPaths,
+  onRealFolderPaths,
   onSelectionContextChange,
   onOpenSettings,
 }: Props) {
@@ -73,6 +90,48 @@ export default function MillerColumns({
     const parts = path.split("/").filter(Boolean);
     return parts[parts.length - 1] ?? path;
   }, []);
+
+  // Build a synthetic folder entry for a path the user just created locally
+  // but has not yet written any file into. We mirror the JavaFX UI's
+  // `addCloudFileInUploadingProcess` behaviour: zero versions, no readers,
+  // size unknown -- it is purely a UI placeholder.
+  const buildPendingFolderEntry = useCallback((fullPath: string): FileEntry => {
+    const name = fullPath.split("/").filter(Boolean).pop() ?? fullPath;
+    return {
+      name,
+      path: fullPath,
+      is_dir: true,
+      size: null,
+      created: null,
+      version: null,
+      readers: [],
+      encrypted: false,
+      mime_type: null,
+    };
+  }, []);
+
+  // Pending folders whose immediate parent is `parentPath`.
+  const pendingChildrenOf = useCallback((parentPath: string): FileEntry[] => {
+    if (!pendingFolderPaths || pendingFolderPaths.size === 0) return [];
+    const out: FileEntry[] = [];
+    for (const fullPath of pendingFolderPaths) {
+      const idx = fullPath.lastIndexOf("/");
+      const parent = idx <= 0 ? "/" : fullPath.slice(0, idx);
+      if (parent === parentPath) {
+        out.push(buildPendingFolderEntry(fullPath));
+      }
+    }
+    return out;
+  }, [pendingFolderPaths, buildPendingFolderEntry]);
+
+  const mergePendingFolders = useCallback((column: ColumnState): ColumnState => {
+    const pending = pendingChildrenOf(column.path);
+    if (pending.length === 0) return column;
+    const realPaths = new Set(column.entries.map((e) => e.path));
+    const additions = pending.filter((p) => !realPaths.has(p.path));
+    if (additions.length === 0) return column;
+    return { ...column, entries: sortEntries([...column.entries, ...additions]) };
+  }, [pendingChildrenOf, sortEntries]);
 
   const loadColumn = useCallback(async (path: string): Promise<ColumnState> => {
     const data = await listDir(path);
@@ -111,8 +170,26 @@ export default function MillerColumns({
           if (!mounted) return;
         }
 
+        // Tell the owner which folder paths the BACKEND actually returned --
+        // it uses this to prune any pending-folder entries that have since
+        // become real (e.g. because a file was uploaded into them). We do
+        // this BEFORE merging pending folders so the next render reflects
+        // the pruned state.
+        if (onRealFolderPaths) {
+          const realFolderPaths = new Set<string>();
+          for (const col of restored) {
+            for (const e of col.entries) {
+              if (e.is_dir) realFolderPaths.add(e.path);
+            }
+          }
+          onRealFolderPaths(realFolderPaths);
+        }
+
         // Carry per-column selection forward; drop entries that no longer exist.
         for (let i = 0; i < restored.length; i += 1) {
+          // Layer pending (client-only) folders on top of the backend listing
+          // so the user keeps seeing folders they just created.
+          restored[i] = mergePendingFolders(restored[i]);
           const prev = prevColumns[i];
           if (!prev) continue;
           const present = new Set(restored[i].entries.map((e) => e.path));
@@ -141,7 +218,22 @@ export default function MillerColumns({
     return () => {
       mounted = false;
     };
-  }, [loadColumn, reloadToken]);
+  }, [loadColumn, reloadToken, mergePendingFolders, onRealFolderPaths]);
+
+  // When the set of pending folders changes (e.g. user just clicked
+  // New Folder), re-merge into the currently-displayed columns so the new
+  // entry appears WITHOUT forcing a network round-trip.
+  useEffect(() => {
+    setColumns((prev) => {
+      let mutated = false;
+      const next = prev.map((col) => {
+        const merged = mergePendingFolders(col);
+        if (merged !== col) mutated = true;
+        return merged;
+      });
+      return mutated ? next : prev;
+    });
+  }, [mergePendingFolders]);
 
   useEffect(() => {
     setActiveColumnIdx((prev) => Math.min(prev, Math.max(columns.length - 1, 0)));
@@ -223,7 +315,7 @@ export default function MillerColumns({
     if (!entry.is_dir) return;
 
     try {
-      const next = await loadColumn(entry.path);
+      const next = mergePendingFolders(await loadColumn(entry.path));
       if (navRequestId !== latestNavRequestRef.current) return;
 
       setColumns((prev) => {
@@ -245,7 +337,7 @@ export default function MillerColumns({
     } catch {
       setColumns((prev) => prev.slice(0, colIdx + 1));
     }
-  }, [loadColumn]);
+  }, [loadColumn, mergePendingFolders]);
 
   const moveSelection = useCallback((delta: number) => {
     const column = columns[activeColumnIdx];
