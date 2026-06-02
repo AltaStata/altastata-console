@@ -1,9 +1,17 @@
 import {
+  Autocomplete,
   Box,
+  Button,
+  CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   IconButton,
   InputBase,
   LinearProgress,
   Stack,
+  TextField,
   Tooltip,
   Divider,
   Typography,
@@ -15,15 +23,17 @@ import DownloadIcon from "@mui/icons-material/Download";
 import UploadIcon from "@mui/icons-material/Upload";
 import DriveFolderUploadIcon from "@mui/icons-material/DriveFolderUpload";
 import ShareIcon from "@mui/icons-material/Share";
-import LockIcon from "@mui/icons-material/Lock";
+import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import GridViewIcon from "@mui/icons-material/GridView";
 import { useRef, useState, type ChangeEvent } from "react";
 import { zip } from "fflate";
 import {
   deletePath,
   downloadFile,
+  listKnownUsers,
   makeUniqueArchiveName,
   resolveUploadTargetPath,
+  revokePaths,
   runWithConcurrency,
   sharePaths,
   streamDirectoryZip,
@@ -344,16 +354,93 @@ export default function BottomToolbar({ selectedEntries, activePath, onRefresh }
     });
   };
 
-  const handleShare = async () => {
-    if (!singleSelection || singleSelection.is_dir) return;
-    const currentReaders = singleSelection.readers.join(", ");
-    const input = window.prompt("Share with readers (comma separated)", currentReaders);
-    if (!input) return;
-    const readers = input.split(",").map((item) => item.trim()).filter(Boolean);
-    if (readers.length === 0) return;
-    await runAction("Share", async () => {
-      await sharePaths([singleSelection.path], readers);
+  type AccessDialogMode = "share" | "revoke";
+  interface AccessDialogState {
+    mode: AccessDialogMode;
+    targets: FileEntry[];
+    loadingUsers: boolean;
+    knownUsers: string[];
+    selected: string;
+    error: string | null;
+  }
+  const [accessDialog, setAccessDialog] = useState<AccessDialogState | null>(null);
+
+  const openAccessDialog = async (mode: AccessDialogMode) => {
+    if (selectionCount === 0 || busy) return;
+    const targets = [...selectedEntries];
+    // Pre-seed with current readers (union across selection) so revoking is
+    // intuitive — the user sees who already has access.
+    const currentReaders = new Set<string>();
+    for (const entry of targets) {
+      for (const reader of entry.readers ?? []) {
+        if (reader) currentReaders.add(reader);
+      }
+    }
+    setAccessDialog({
+      mode,
+      targets,
+      loadingUsers: true,
+      knownUsers: [...currentReaders].sort((a, b) =>
+        a.localeCompare(b, undefined, { sensitivity: "base" }),
+      ),
+      selected: "",
+      error: null,
     });
+    try {
+      const users = await listKnownUsers();
+      setAccessDialog((prev) => {
+        if (!prev) return prev;
+        const merged = new Set<string>([...prev.knownUsers, ...users]);
+        return {
+          ...prev,
+          loadingUsers: false,
+          knownUsers: [...merged].sort((a, b) =>
+            a.localeCompare(b, undefined, { sensitivity: "base" }),
+          ),
+        };
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setAccessDialog((prev) =>
+        prev ? { ...prev, loadingUsers: false, error: `Cannot list users: ${message}` } : prev,
+      );
+    }
+  };
+
+  const closeAccessDialog = () => {
+    if (busy) return;
+    setAccessDialog(null);
+  };
+
+  const submitAccessDialog = async () => {
+    if (!accessDialog) return;
+    const reader = accessDialog.selected.trim();
+    if (!reader) {
+      setAccessDialog({ ...accessDialog, error: "Pick a user." });
+      return;
+    }
+    const { mode, targets } = accessDialog;
+    const paths = targets.map((e) => e.path);
+    setAccessDialog(null);
+    const label = mode === "share"
+      ? `Share with ${reader}`
+      : `Revoke ${reader}`;
+    await runAction(label, async () => {
+      if (mode === "share") {
+        await sharePaths(paths, [reader]);
+      } else {
+        await revokePaths(paths, [reader]);
+      }
+    });
+    // Share is processed asynchronously by the AltaStata msgqueue / SecureCloudEventProcessor:
+    // the gRPC call returns as soon as the ADDREADER message is queued, so the file's "readers"
+    // attribute does not yet reflect the new reader when the immediate refresh fires. Schedule a
+    // couple of follow-up refreshes so the preview pane catches up without the user having to
+    // re-click the file. Revoke is applied synchronously, so no follow-up is needed.
+    if (mode === "share") {
+      window.setTimeout(() => onRefresh(), 1500);
+      window.setTimeout(() => onRefresh(), 4000);
+    }
   };
 
   return (
@@ -442,21 +529,37 @@ export default function BottomToolbar({ selectedEntries, activePath, onRefresh }
               </IconButton>
             </span>
           </Tooltip>
-          <Tooltip title={selectionCount > 1 ? "Select a single file to share" : "Share selected file"}>
+          <Tooltip
+            title={
+              selectionCount > 1
+                ? `Share ${selectionCount} items with a reader`
+                : "Share selected item with a reader"
+            }
+          >
             <span>
               <IconButton
                 size="small"
-                disabled={busy || !singleSelection || singleSelection.is_dir}
-                onClick={() => void handleShare()}
+                disabled={busy || selectionCount === 0}
+                onClick={() => void openAccessDialog("share")}
               >
                 <ShareIcon fontSize="small" />
               </IconButton>
             </span>
           </Tooltip>
-          <Tooltip title="Lock / encrypt (not wired yet)">
+          <Tooltip
+            title={
+              selectionCount > 1
+                ? `Revoke a reader's access from ${selectionCount} items`
+                : "Revoke a reader's access from selected item"
+            }
+          >
             <span>
-              <IconButton size="small" disabled>
-                <LockIcon fontSize="small" />
+              <IconButton
+                size="small"
+                disabled={busy || selectionCount === 0}
+                onClick={() => void openAccessDialog("revoke")}
+              >
+                <PersonRemoveIcon fontSize="small" />
               </IconButton>
             </span>
           </Tooltip>
@@ -514,6 +617,82 @@ export default function BottomToolbar({ selectedEntries, activePath, onRefresh }
         style={{ display: "none" }}
         onChange={(e) => void handleUploadFolderSelected(e)}
       />
+
+      <Dialog
+        open={accessDialog !== null}
+        onClose={closeAccessDialog}
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle sx={{ pb: 1 }}>
+          {accessDialog?.mode === "share" ? "Share access" : "Revoke access"}
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={1.5} sx={{ mt: 0.5 }}>
+            <Typography variant="body2" color="text.secondary">
+              {accessDialog
+                ? accessDialog.targets.length === 1
+                  ? `${accessDialog.targets[0].is_dir ? "Folder" : "File"}: ${accessDialog.targets[0].path}`
+                  : `${accessDialog.targets.length} items selected`
+                : ""}
+            </Typography>
+            <Autocomplete
+              freeSolo
+              size="small"
+              options={accessDialog?.knownUsers ?? []}
+              value={accessDialog?.selected ?? ""}
+              onChange={(_, value) => {
+                if (!accessDialog) return;
+                setAccessDialog({
+                  ...accessDialog,
+                  selected: typeof value === "string" ? value : "",
+                  error: null,
+                });
+              }}
+              onInputChange={(_, value) => {
+                if (!accessDialog) return;
+                setAccessDialog({ ...accessDialog, selected: value, error: null });
+              }}
+              loading={accessDialog?.loadingUsers ?? false}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  autoFocus
+                  label={accessDialog?.mode === "share" ? "Share with user" : "Revoke from user"}
+                  placeholder="user.account"
+                  InputProps={{
+                    ...params.InputProps,
+                    endAdornment: (
+                      <>
+                        {accessDialog?.loadingUsers
+                          ? <CircularProgress color="inherit" size={16} />
+                          : null}
+                        {params.InputProps.endAdornment}
+                      </>
+                    ),
+                  }}
+                />
+              )}
+            />
+            {accessDialog?.error && (
+              <Typography variant="caption" color="error.main">
+                {accessDialog.error}
+              </Typography>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeAccessDialog}>Cancel</Button>
+          <Button
+            variant="contained"
+            color={accessDialog?.mode === "revoke" ? "warning" : "primary"}
+            onClick={() => void submitAccessDialog()}
+            disabled={!accessDialog || !accessDialog.selected.trim()}
+          >
+            {accessDialog?.mode === "share" ? "Share" : "Revoke"}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

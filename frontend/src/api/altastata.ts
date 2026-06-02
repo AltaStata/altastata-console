@@ -72,6 +72,15 @@ message ShareRequest {
   repeated string readers = 2;
 }
 message ShareResult { repeated FileStatus statuses = 1; }
+message RevokeRequest {
+  repeated string file_paths = 1;
+  repeated string readers = 2;
+}
+message RevokeResult { repeated FileStatus statuses = 1; }
+message UserSummary {
+  string user_name = 1;
+  bool initialized = 2;
+}
 message GetAttributesRequest {
   string file_path = 1;
   int64 snapshot_time = 2;
@@ -975,13 +984,21 @@ export async function fetchFilePreviewMetadata(
   try {
     await maybeBootstrap();
     const cloudPath = toCloudPath(path);
-    const snapshotTime = parseVersionTimestamp(version) ?? 0;
-    const attrs = await withBootstrapRetry(() => getAttributes(cloudPath, ["size", "readers"], snapshotTime));
-    const normalizedSize = (attrs.size ?? "").replace(/,/g, "").trim();
+    const versionSnapshot = parseVersionTimestamp(version) ?? 0;
+    // Query size at the version's snapshot (immutable per version).
+    // Query readers without a snapshot so the response reflects the LIVE ACL,
+    // which is what the user expects to see right after Share / Revoke. If we
+    // re-used `versionSnapshot` here, sharing a file post-creation would not
+    // show up in the preview pane until a new version was written.
+    const [sizeAttrs, readerAttrs] = await Promise.all([
+      withBootstrapRetry(() => getAttributes(cloudPath, ["size"], versionSnapshot)),
+      withBootstrapRetry(() => getAttributes(cloudPath, ["readers"], 0)),
+    ]);
+    const normalizedSize = (sizeAttrs.size ?? "").replace(/,/g, "").trim();
     const size = normalizedSize && /^\d+$/.test(normalizedSize) ? Number(normalizedSize) : null;
-    const sizeRaw = attrs.size?.trim() ? attrs.size.trim() : null;
+    const sizeRaw = sizeAttrs.size?.trim() ? sizeAttrs.size.trim() : null;
     const tag = parseVersionTag(version);
-    const readersRaw = attrs.readers?.trim() ?? "";
+    const readersRaw = readerAttrs.readers?.trim() ?? "";
     const readers = readersRaw
       ? readersRaw.split(/[;,\n]/).map((item) => item.trim()).filter(Boolean)
       : [];
@@ -1058,6 +1075,64 @@ export async function sharePaths(paths: string[], readers: string[]): Promise<vo
     if (failed?.error) {
       throw new Error(failed.error);
     }
+  } catch (error) {
+    throw authHint(error);
+  }
+}
+
+export async function revokePaths(paths: string[], readers: string[]): Promise<void> {
+  try {
+    await maybeBootstrap();
+    const cloudPaths = paths.map((p) => toCloudPath(p)).filter(Boolean);
+    if (cloudPaths.length === 0) return;
+    const resp = await withBootstrapRetry(() => grpcUnary(
+        "altastata.v1.SharingService/Revoke",
+        "RevokeRequest",
+        { filePaths: cloudPaths, readers },
+        "RevokeResult",
+        true,
+    ));
+    const statuses = Array.isArray(resp.statuses)
+      ? (resp.statuses as { error?: string }[])
+      : [];
+    const failed = statuses.find((item) => item.error && item.error.trim().length > 0);
+    if (failed?.error) {
+      throw new Error(failed.error);
+    }
+  } catch (error) {
+    throw authHint(error);
+  }
+}
+
+/**
+ * Returns the user-supplied list of known accounts (skipping the current
+ * user and the custodian) — the set the JavaFX UI shows in its share /
+ * revoke autocomplete combobox.
+ */
+export async function listKnownUsers(): Promise<string[]> {
+  try {
+    await maybeBootstrap();
+    const messages = await withBootstrapRetry(() => grpcServerStream(
+      "altastata.v1.UsersService/ListUsers",
+      "Empty",
+      {},
+      "UserSummary",
+      true,
+    ));
+    const myAccount = await getAccount().catch(() => null);
+    const me = myAccount?.account_id?.split(".").at(-1) ?? null;
+    const seen = new Set<string>();
+    const users: string[] = [];
+    for (const msg of messages) {
+      const name = typeof msg.userName === "string" ? msg.userName : "";
+      if (!name || seen.has(name)) continue;
+      if (name === me) continue;
+      if (name.toLowerCase() === "custodian") continue;
+      seen.add(name);
+      users.push(name);
+    }
+    users.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+    return users;
   } catch (error) {
     throw authHint(error);
   }

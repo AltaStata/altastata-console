@@ -386,7 +386,7 @@ export default function MillerColumns({
             defaultSize={38}
             minSize={20}
           >
-            <PreviewPane file={previewFile} />
+            <PreviewPane file={previewFile} refreshToken={reloadToken} />
           </Panel>
         </PanelGroup>
       </Box>
