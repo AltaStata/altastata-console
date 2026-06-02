@@ -86,6 +86,10 @@ message ReadStreamRequest {
   int32 chunk_size = 5;
 }
 message ReadStreamChunk { bytes data = 1; }
+message DownloadDirectoryAsZipRequest {
+  string cloud_path_prefix = 1;
+}
+message DownloadDirectoryAsZipChunk { bytes data = 1; }
 `;
 
 const root = protobufjs.parse(PROTO_DEF).root;
@@ -356,6 +360,97 @@ async function grpcUnary(
     objects: true,
     defaults: false,
   }) as Record<string, unknown>;
+}
+
+async function grpcServerStreamWithCallback(
+  methodPath: string,
+  reqTypeName: string,
+  reqObj: object,
+  respTypeName: string,
+  withAuth: boolean,
+  onMessage: (msg: Record<string, unknown>) => void | Promise<void>,
+  options: { idleTimeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<void> {
+  const idleTimeoutMs = options.idleTimeoutMs ?? REQUEST_TIMEOUT_MS;
+  const reqType = T(reqTypeName);
+  const respType = T(respTypeName);
+  const payload = reqType.encode(reqType.create(reqObj)).finish() as Bytes;
+  const body = frameMessage(payload);
+  const controller = new AbortController();
+  const onParentAbort = () => controller.abort();
+  if (options.signal) {
+    if (options.signal.aborted) controller.abort();
+    else options.signal.addEventListener("abort", onParentAbort, { once: true });
+  }
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl()}/${methodPath}`, {
+      method: "POST",
+      headers: grpcHeaders(withAuth),
+      body: body as unknown as BodyInit,
+      signal: controller.signal,
+    });
+  } finally {
+    if (options.signal) options.signal.removeEventListener("abort", onParentAbort);
+  }
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} ${response.statusText}`);
+  }
+  if (!response.body) {
+    throw new Error("Missing response body for gRPC stream");
+  }
+
+  const reader = response.body.getReader();
+  let stash: Bytes = new Uint8Array(0);
+  let trailers = new Map<string, string>();
+  let sawTrailerFrame = false;
+
+  let done = false;
+  while (!done) {
+    const chunk = await withTimeout(
+      reader.read(),
+      idleTimeoutMs,
+      `Timed out reading stream response for ${methodPath}`,
+    );
+    done = chunk.done;
+    const value = chunk.value;
+    if (value && value.length > 0) {
+      stash = concat(stash, value as Uint8Array);
+      const parsed = extractFrames(stash);
+      stash = parsed.rest;
+      for (const frame of parsed.frames) {
+        if (frame.trailer) {
+          sawTrailerFrame = true;
+          trailers = parseTrailers(frame.payload);
+          continue;
+        }
+        const decoded = respType.decode(frame.payload);
+        const obj = respType.toObject(decoded, {
+          longs: Number,
+          arrays: true,
+          objects: true,
+          defaults: false,
+        }) as Record<string, unknown>;
+        await onMessage(obj);
+      }
+    }
+  }
+
+  if (!sawTrailerFrame) {
+    const statusHeader = response.headers.get("grpc-status");
+    if (statusHeader) {
+      trailers = new Map([["grpc-status", statusHeader]]);
+      const msg = response.headers.get("grpc-message");
+      if (msg) trailers.set("grpc-message", msg);
+    } else {
+      throw new Error("Missing gRPC trailer frame in stream response");
+    }
+  }
+
+  const grpcStatus = trailers.get("grpc-status") ?? "0";
+  if (grpcStatus !== "0") {
+    throw new Error(`gRPC status=${grpcStatus} message=${grpcMessageFromMap(trailers)}`);
+  }
 }
 
 async function grpcServerStream(
@@ -893,9 +988,52 @@ export async function downloadFile(path: string, version: string | null): Promis
   return fetchPreviewBlob(path, version, null);
 }
 
-export function getDirectoryZipDownloadUrl(path: string): string {
-  const normalizedPath = normalizePath(path);
-  return `/api/download-directory-zip?path=${encodeURIComponent(normalizedPath)}`;
+const ZIP_STREAM_IDLE_TIMEOUT_MS = 60_000;
+
+export interface StreamDirectoryZipOptions {
+  signal?: AbortSignal;
+  idleTimeoutMs?: number;
+}
+
+export async function streamDirectoryZip(
+  path: string,
+  onChunk: (chunk: Uint8Array) => void | Promise<void>,
+  options: StreamDirectoryZipOptions = {},
+): Promise<void> {
+  try {
+    await maybeBootstrap();
+    const cloudPath = toCloudPath(path);
+    await withBootstrapRetry(() => grpcServerStreamWithCallback(
+      "altastata.v1.FileOpsService/DownloadDirectoryAsZip",
+      "DownloadDirectoryAsZipRequest",
+      { cloudPathPrefix: cloudPath },
+      "DownloadDirectoryAsZipChunk",
+      true,
+      async (msg) => {
+        const data = msg.data;
+        if (data instanceof Uint8Array) {
+          if (data.length > 0) await onChunk(data);
+        } else if (Array.isArray(data)) {
+          const arr = new Uint8Array(data as number[]);
+          if (arr.length > 0) await onChunk(arr);
+        }
+      },
+      {
+        idleTimeoutMs: options.idleTimeoutMs ?? ZIP_STREAM_IDLE_TIMEOUT_MS,
+        signal: options.signal,
+      },
+    ));
+  } catch (error) {
+    throw authHint(error);
+  }
+}
+
+export function suggestedZipFileName(path: string): string {
+  const normalized = normalizePath(path);
+  if (normalized === "/") return "root.zip";
+  const segments = normalized.split("/").filter(Boolean);
+  const last = segments[segments.length - 1] || "root";
+  return `${last}.zip`;
 }
 
 export function resolveUploadTargetPath(

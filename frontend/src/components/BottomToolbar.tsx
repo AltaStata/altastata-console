@@ -20,9 +20,10 @@ import { useRef, useState, type ChangeEvent } from "react";
 import {
   deletePath,
   downloadFile,
-  getDirectoryZipDownloadUrl,
   resolveUploadTargetPath,
   sharePaths,
+  streamDirectoryZip,
+  suggestedZipFileName,
   uploadFile,
 } from "@/api/altastata";
 import type { FileEntry } from "@/types";
@@ -105,23 +106,12 @@ export default function BottomToolbar({ selectedEntry, activePath, onRefresh }: 
     setStatus("Download started (watch browser downloads for completion)");
   };
 
-  const writeStreamToHandle = async (handle: SaveFileHandle, response: Response) => {
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      throw new Error(`HTTP ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ""}`);
-    }
+  const streamZipToHandle = async (handle: SaveFileHandle, path: string) => {
     const writable = await handle.createWritable();
     try {
-      if (!response.body) {
-        await writable.write(await response.arrayBuffer());
-      } else {
-        const reader = response.body.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) await writable.write(value);
-        }
-      }
+      await streamDirectoryZip(path, async (chunk) => {
+        await writable.write(chunk);
+      });
       await writable.close();
     } catch (error) {
       try {
@@ -131,6 +121,14 @@ export default function BottomToolbar({ selectedEntry, activePath, onRefresh }: 
       }
       throw error;
     }
+  };
+
+  const collectZipBlob = async (path: string): Promise<Blob> => {
+    const parts: BlobPart[] = [];
+    await streamDirectoryZip(path, (chunk) => {
+      parts.push(chunk.slice());
+    });
+    return new Blob(parts, { type: "application/zip" });
   };
 
   const writeBlobToHandle = async (handle: SaveFileHandle, blob: Blob) => {
@@ -152,7 +150,7 @@ export default function BottomToolbar({ selectedEntry, activePath, onRefresh }: 
     if (!selectedEntry || busy) return;
 
     const entry = selectedEntry;
-    const downloadName = entry.is_dir ? `${entry.name}.zip` : entry.name;
+    const downloadName = entry.is_dir ? suggestedZipFileName(entry.path) : entry.name;
     const showSaveFilePicker = (window as SavePickerWindow).showSaveFilePicker;
 
     // Must open the save dialog synchronously in the click handler (user gesture).
@@ -178,12 +176,10 @@ export default function BottomToolbar({ selectedEntry, activePath, onRefresh }: 
     }
 
     if (!saveHandle) {
-      if (entry.is_dir) {
-        startBrowserDownload(getDirectoryZipDownloadUrl(entry.path), downloadName);
-        return;
-      }
       await runAction("Download", async () => {
-        const blob = await downloadFile(entry.path, entry.version);
+        const blob = entry.is_dir
+          ? await collectZipBlob(entry.path)
+          : await downloadFile(entry.path, entry.version);
         const url = URL.createObjectURL(blob);
         try {
           startBrowserDownload(url, downloadName);
@@ -196,8 +192,7 @@ export default function BottomToolbar({ selectedEntry, activePath, onRefresh }: 
 
     await runAction("Download", async () => {
       if (entry.is_dir) {
-        const response = await fetch(getDirectoryZipDownloadUrl(entry.path), { method: "GET" });
-        await writeStreamToHandle(saveHandle as SaveFileHandle, response);
+        await streamZipToHandle(saveHandle as SaveFileHandle, entry.path);
         return;
       }
       const blob = await downloadFile(entry.path, entry.version);
