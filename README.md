@@ -32,12 +32,12 @@ altastata-console/
 │       │   ├── FileColumn.tsx      ← single column of files/folders
 │       │   ├── PreviewPane.tsx     ← right pane: preview + metadata
 │       │   └── BottomToolbar.tsx   ← upload/download/share/lock/...
-│       ├── api/altastata.ts        ← typed API client
+│       ├── api/altastata.ts        ← typed API client (gRPC-Web)
 │       ├── theme/index.ts          ← MUI theme matching JavaFX look
 │       └── types/index.ts          ← shared TS types
-├── backend/           (legacy adapter, optional; not required for gRPC mode)
-├── Dockerfile         (legacy full-stack image)
-├── docker-compose.yml (legacy backend stack)
+├── nginx/default.conf  ← SPA + history-API fallback for prod image
+├── Dockerfile          ← multi-stage: `dist` (bundle only) and
+│                         `runtime` (nginx serving the bundle)
 └── docs/architecture.md
 ```
 
@@ -120,14 +120,41 @@ ALLOW_SECRETS_COMMIT=1 git commit -m "..."
 
 ## Production build
 
+The `Dockerfile` is a multi-stage build with two targets you can use
+independently.
+
+### Standalone nginx image (default)
+
+Builds the React bundle and ships it inside a small `nginx:alpine`
+image that serves the SPA on port 8080:
+
 ```bash
-docker build -t altastata-console:dev .
-docker run -p 8000:8000 \
-  -v ~/.altastata:/root/.altastata:ro \
-  altastata-console:dev
+docker build -t altastata-console:latest .
+docker run --rm -p 8080:8080 altastata-console:latest
 ```
 
-Then open <http://localhost:8000>.
+Then open <http://localhost:8080>. The image is stateless — no
+credentials are baked in. The Java gRPC URL and account info are
+entered at runtime from the Settings dialog (see Quick start above).
+
+### Embedding into another image
+
+If you want to host the UI inside another image (for example a
+Jupyter image, or a service that already exposes its own web port),
+build only the `dist` stage and copy the bundle out:
+
+```bash
+docker build --target dist -t altastata-console:dist .
+```
+
+Then in the consumer Dockerfile:
+
+```dockerfile
+COPY --from=altastata-console:dist /app/dist /usr/share/jupyter/altastata-ui
+```
+
+That way the same source produces both a self-contained image and an
+embeddable static bundle, with no Python or FastAPI runtime.
 
 ## Why a separate repo?
 

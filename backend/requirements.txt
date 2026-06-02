@@ -1,7 +1,0 @@
-# Pin runtime deps for reproducible Docker builds.
-# Dev deps live in pyproject.toml [project.optional-dependencies].dev
-altastata>=0.1.32
-fastapi>=0.111
-uvicorn[standard]>=0.30
-pydantic>=2.7
-python-multipart>=0.0.9

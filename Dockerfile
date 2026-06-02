@@ -1,39 +1,49 @@
 # syntax=docker/dockerfile:1.6
 #
-# Multi-stage build:
-#   1. node: build the React frontend → /frontend/dist
-#   2. python: install backend + altastata, copy frontend dist into /app/static
+# Multi-stage build for the AltaStata Console UI:
 #
-# Single container in prod (Option A): FastAPI/Uvicorn serves both
-# /api/* and the static React app on the same port (8000).
+#   1. builder  — Node stage that runs `npm ci` and `npm run build`.
+#                 This is an internal stage; it carries the whole
+#                 toolchain (node_modules, TypeScript, Vite, etc.) and
+#                 is not meant to be published.
+#   2. dist     — Tiny `scratch`-based stage that contains *only* the
+#                 built bundle in /app/dist. Use this target when
+#                 embedding the UI into another image (e.g. a Jupyter
+#                 image) via `COPY --from=...`.
+#   3. runtime  — Self-contained nginx image that serves the SPA on
+#                 port 8080 with SPA history-API fallback. This is the
+#                 default target.
+#
+# Build a standalone container:
+#     docker build -t altastata-console:latest .
+#
+# Build only the static bundle for embedding:
+#     docker build --target dist -t altastata-console:dist .
+# Then in another image:
+#     COPY --from=altastata-console:dist /app/dist /target/path
+#
+# The UI talks directly to the AltaStata gRPC server (gRPC-Web). The
+# gRPC URL is configurable at runtime from the in-app Settings dialog,
+# so this image needs no gRPC-related environment variables.
 
-FROM node:20-bookworm-slim AS frontend
-WORKDIR /frontend
+FROM node:20-bookworm-slim AS builder
+WORKDIR /app
 COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
 
-FROM python:3.11-slim-bookworm AS runtime
+FROM scratch AS dist
+COPY --from=builder /app/dist /app/dist
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        openjdk-17-jre-headless \
-    && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+FROM nginx:alpine AS runtime
+COPY --from=builder /app/dist /usr/share/nginx/html
+COPY nginx/default.conf /etc/nginx/conf.d/default.conf
 
-COPY backend/requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Listen on an unprivileged port so the image runs under arbitrary
+# non-root UIDs (e.g. on OpenShift) without extra capabilities.
+EXPOSE 8080
 
-COPY backend/pyproject.toml ./
-COPY backend/src ./src
-RUN pip install --no-cache-dir -e .
-
-COPY --from=frontend /frontend/dist ./static
-ENV STATIC_DIR=/app/static
-
-EXPOSE 8000
-
-CMD ["uvicorn", "altastata_console.main:app", \
-     "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+CMD ["nginx", "-g", "daemon off;"]
