@@ -78,12 +78,18 @@ environment that installs `altastata` (pip / Jupyter / mycloud
 containers) automatically gets the UI bytes alongside the library.
 
 In production, the Java gRPC server (`mycloud/altastata-grpc`) serves
-those static files directly from the classpath / package directory
-on `:9877` — both gRPC API and SPA come from the same origin and
-port, so CORS is a non-issue and there is no separate web server to
-operate.
+those static files directly from the filesystem path supplied via the
+`ALTASTATA_WEB_UI_DIR` environment variable on `:9877` — both gRPC
+API and SPA come from the same origin and port, so CORS is a non-issue
+and there is no separate web server to operate. The Python launcher
+(`altastata-grpc-server` in the `altastata` package) sets
+`ALTASTATA_WEB_UI_DIR` automatically when the bundle is present at
+`altastata/lib/altastata-console-static/`; if the directory is
+missing or `index.html` is absent, the server logs a warning and runs
+in gRPC-only mode (it never fails to start).
 
-To refresh the bundle, run `npm run build` here and copy
-`frontend/dist/` into the corresponding folder of
-`altastata-python-package`. The release of the Python package then
-carries the updated UI.
+To refresh the bundle, run `altastata-python-package/scripts/build-bundled-artifacts.sh`
+— it invokes `npm run build` here, then copies `frontend/dist/` into
+`altastata-python-package/altastata/lib/altastata-console-static/`.
+The bundle is **not committed** (`altastata/lib/` is gitignored); it
+is rebuilt locally for each Python package release.

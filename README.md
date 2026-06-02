@@ -137,9 +137,17 @@ directly on `:9877` — no separate web container is needed.
 
 [pyalt]: https://github.com/SergeVil/altastata-python-package
 
-To refresh the bundle in the Python package, copy `frontend/dist/`
-into `altastata-python-package/altastata/lib/altastata-console-static/`
-and commit there. There is no Docker step in this repo.
+The bundle is **not committed** to the Python package repo
+(`altastata/lib/` is gitignored, same policy as
+`altastata-grpc-*-uber.jar`). It is rebuilt locally before each
+release by
+[`altastata-python-package/scripts/build-bundled-artifacts.sh`][buildscript],
+which runs `npm run build` here, then copies `frontend/dist/` into
+`altastata-python-package/altastata/lib/altastata-console-static/`.
+
+[buildscript]: https://github.com/SergeVil/altastata-python-package/blob/openshift/scripts/build-bundled-artifacts.sh
+
+There is no Docker step in this repo.
 
 ## Why a separate repo?
 
