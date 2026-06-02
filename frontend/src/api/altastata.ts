@@ -893,6 +893,11 @@ export async function downloadFile(path: string, version: string | null): Promis
   return fetchPreviewBlob(path, version, null);
 }
 
+export function getDirectoryZipDownloadUrl(path: string): string {
+  const normalizedPath = normalizePath(path);
+  return `/api/download-directory-zip?path=${encodeURIComponent(normalizedPath)}`;
+}
+
 export function resolveUploadTargetPath(
   fileName: string,
   selectedEntry: FileEntry | null,

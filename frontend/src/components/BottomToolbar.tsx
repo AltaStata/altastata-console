@@ -20,6 +20,7 @@ import { useRef, useState, type ChangeEvent } from "react";
 import {
   deletePath,
   downloadFile,
+  getDirectoryZipDownloadUrl,
   resolveUploadTargetPath,
   sharePaths,
   uploadFile,
@@ -31,6 +32,24 @@ interface Props {
   activePath: string;
   onRefresh: () => void;
 }
+
+type SaveFileHandle = {
+  createWritable: () => Promise<{
+    write: (data: Uint8Array | ArrayBuffer) => Promise<void>;
+    close: () => Promise<void>;
+    abort: () => Promise<void>;
+  }>;
+};
+
+type SavePickerWindow = Window & {
+  showSaveFilePicker?: (options?: {
+    suggestedName?: string;
+    types?: Array<{
+      description: string;
+      accept: Record<string, string[]>;
+    }>;
+  }) => Promise<SaveFileHandle>;
+};
 
 export default function BottomToolbar({ selectedEntry, activePath, onRefresh }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -50,6 +69,10 @@ export default function BottomToolbar({ selectedEntry, activePath, onRefresh }: 
       setStatus(`${label} done`);
       onRefresh();
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setStatus(`${label} cancelled`);
+        return;
+      }
       setStatus(error instanceof Error ? `${label} failed: ${error.message}` : `${label} failed`);
     } finally {
       setBusy(false);
@@ -72,21 +95,113 @@ export default function BottomToolbar({ selectedEntry, activePath, onRefresh }: 
     event.target.value = "";
   };
 
-  const handleDownload = async () => {
-    if (!selectedEntry || selectedEntry.is_dir) return;
-    await runAction("Download", async () => {
-      const blob = await downloadFile(selectedEntry.path, selectedEntry.version);
-      const url = URL.createObjectURL(blob);
-      try {
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = selectedEntry.name;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-      } finally {
-        URL.revokeObjectURL(url);
+  const startBrowserDownload = (href: string, downloadName: string) => {
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = downloadName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setStatus("Download started (watch browser downloads for completion)");
+  };
+
+  const writeStreamToHandle = async (handle: SaveFileHandle, response: Response) => {
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      throw new Error(`HTTP ${response.status} ${response.statusText}${detail ? ` - ${detail}` : ""}`);
+    }
+    const writable = await handle.createWritable();
+    try {
+      if (!response.body) {
+        await writable.write(await response.arrayBuffer());
+      } else {
+        const reader = response.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) await writable.write(value);
+        }
       }
+      await writable.close();
+    } catch (error) {
+      try {
+        await writable.abort();
+      } catch {
+        // Ignore abort errors if writer is already closed.
+      }
+      throw error;
+    }
+  };
+
+  const writeBlobToHandle = async (handle: SaveFileHandle, blob: Blob) => {
+    const writable = await handle.createWritable();
+    try {
+      await writable.write(await blob.arrayBuffer());
+      await writable.close();
+    } catch (error) {
+      try {
+        await writable.abort();
+      } catch {
+        // Ignore abort errors if writer is already closed.
+      }
+      throw error;
+    }
+  };
+
+  const handleDownload = async () => {
+    if (!selectedEntry || busy) return;
+
+    const entry = selectedEntry;
+    const downloadName = entry.is_dir ? `${entry.name}.zip` : entry.name;
+    const showSaveFilePicker = (window as SavePickerWindow).showSaveFilePicker;
+
+    // Must open the save dialog synchronously in the click handler (user gesture).
+    let saveHandle: SaveFileHandle | null = null;
+    if (showSaveFilePicker) {
+      try {
+        saveHandle = await showSaveFilePicker(
+          entry.is_dir
+            ? {
+              suggestedName: downloadName,
+              types: [{ description: "ZIP archive", accept: { "application/zip": [".zip"] } }],
+            }
+            : { suggestedName: downloadName },
+        );
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          setStatus("Download cancelled");
+          return;
+        }
+        // SecurityError or unsupported options — fall back to browser download.
+        saveHandle = null;
+      }
+    }
+
+    if (!saveHandle) {
+      if (entry.is_dir) {
+        startBrowserDownload(getDirectoryZipDownloadUrl(entry.path), downloadName);
+        return;
+      }
+      await runAction("Download", async () => {
+        const blob = await downloadFile(entry.path, entry.version);
+        const url = URL.createObjectURL(blob);
+        try {
+          startBrowserDownload(url, downloadName);
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      });
+      return;
+    }
+
+    await runAction("Download", async () => {
+      if (entry.is_dir) {
+        const response = await fetch(getDirectoryZipDownloadUrl(entry.path), { method: "GET" });
+        await writeStreamToHandle(saveHandle as SaveFileHandle, response);
+        return;
+      }
+      const blob = await downloadFile(entry.path, entry.version);
+      await writeBlobToHandle(saveHandle as SaveFileHandle, blob);
     });
   };
 
@@ -166,9 +281,9 @@ export default function BottomToolbar({ selectedEntry, activePath, onRefresh }: 
         <Divider orientation="vertical" flexItem />
 
         <Stack direction="row" spacing={0.5}>
-          <Tooltip title="Download selected file">
+          <Tooltip title={selectedEntry?.is_dir ? "Download selected folder as ZIP" : "Download selected file"}>
             <span>
-              <IconButton size="small" disabled={busy || !selectedEntry || selectedEntry.is_dir} onClick={() => void handleDownload()}>
+              <IconButton size="small" disabled={busy || !selectedEntry} onClick={() => void handleDownload()}>
                 <DownloadIcon fontSize="small" />
               </IconButton>
             </span>
