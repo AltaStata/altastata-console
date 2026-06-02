@@ -65,7 +65,21 @@ The frontend currently mirrors JavaFX behavior:
 - `.env.local` can provide local defaults, but secrets are not meant to be committed.
 - Source control policy: never commit real user properties, private keys, or passwords.
 
-## Optional backend adapter
+## Deployment
 
-`backend/` (FastAPI + Python `altastata`) remains in the repo as an optional
-adapter/runtime path. It is not required for the default JS + Java gRPC flow.
+The repo produces a single artifact: the React SPA in `frontend/dist`.
+There is no Python adapter and no backend service — the browser talks
+to `altastata-grpc` directly via gRPC-Web.
+
+The multi-stage `Dockerfile` exposes two build targets:
+
+- `dist` — Node stage that runs `npm run build` and leaves the bundle
+  in `/app/dist`. Use this target when embedding the UI inside another
+  image (e.g. a Jupyter image) via `COPY --from=...`.
+- `runtime` — Default target. `nginx:alpine` serving the bundle on
+  port 8080 with SPA history-API fallback (`nginx/default.conf`). The
+  port is unprivileged so the image runs under arbitrary non-root UIDs
+  on OpenShift/Kubernetes without extra capabilities.
+
+Both stages build from the same source, so embedded and standalone
+deployments stay in sync automatically.

@@ -1,6 +1,8 @@
 /**
- * Mirrors backend Pydantic models in altastata_console.models.
- * Keep in sync with backend/src/altastata_console/models.py.
+ * Shape of file/version metadata returned by the gRPC layer
+ * (`frontend/src/api/altastata.ts`). Mirrors the field names exposed
+ * by `altastata.v1.FileOpsService` so the UI can stay close to the
+ * Java side without an extra translation layer.
  */
 
 export interface FileEntry {
