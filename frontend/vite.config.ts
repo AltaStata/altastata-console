@@ -27,6 +27,14 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  // Bake the package version + an ISO build timestamp into the bundle so the
+  // running UI can self-report exactly which build it is. We display both in
+  // the Settings dialog; otherwise it is hard to tell whether the browser has
+  // the latest dist or a stale cached bundle.
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+    __APP_BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+  },
   server: {
     port: 5173,
   },

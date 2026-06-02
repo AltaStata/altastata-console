@@ -18,16 +18,24 @@ import {
   Typography,
 } from "@mui/material";
 import SettingsIcon from "@mui/icons-material/Settings";
+import TerminalIcon from "@mui/icons-material/Terminal";
 import {
   applyRuntimeSettings,
   bootstrapCurrentSettings,
   getAccount,
   setPasswordForCurrentSettings,
+  subscribeToAltaStataEvents,
 } from "@/api/altastata";
 import { getRuntimeSettings, updateRuntimeSettings, type RuntimeSettings } from "@/config/runtimeSettings";
 import type { AccountInfo, FileEntry } from "@/types";
 import MillerColumns from "@/components/MillerColumns";
 import BottomToolbar from "@/components/BottomToolbar";
+import LogDialog from "@/components/LogDialog";
+import { installLogBuffer } from "@/utils/logBuffer";
+
+// Install once at module load so we capture every console.* call from then on,
+// including the very first network errors before <App /> mounts.
+installLogBuffer();
 
 export default function App() {
   const [account, setAccount] = useState<AccountInfo | null>(null);
@@ -40,12 +48,83 @@ export default function App() {
   const [settingsStatus, setSettingsStatus] = useState<string | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const [logOpen, setLogOpen] = useState(false);
 
   useEffect(() => {
     getAccount()
       .then(setAccount)
       .catch((e) => setError(String(e)));
   }, []);
+
+  // Long-lived subscription to AltaStata events. The backend fires `SHARE`
+  // when another user shares a file with us, and `DELETE` when our access is
+  // revoked / a shared file is deleted. We use any event as a cue to reload
+  // the current view so the user never sees a stale list.
+  useEffect(() => {
+    if (!account) return;
+    let cancelled = false;
+    let controller = new AbortController();
+    let retryHandle: number | undefined;
+    const RECONNECT_DELAY_MS = 5_000;
+    // SecureCloudEventProcessor fires the SHARE/DELETE event before its
+    // background "Finishing shot" step finalises the inbound metadata, so a
+    // listDir issued in the immediate event handler can still miss the new
+    // file. We schedule a follow-up refresh ~7s later to pick it up. Empirical
+    // gap observed in altastata-grpc logs is around 5s; pad it a bit.
+    const FOLLOWUP_REFRESH_MS = 7_000;
+    const followUpHandles = new Set<number>();
+
+    const run = async () => {
+      while (!cancelled) {
+        controller = new AbortController();
+        try {
+          // eslint-disable-next-line no-console
+          console.info("[altastata] subscribing to events");
+          await subscribeToAltaStataEvents(
+            () => {
+              if (cancelled) return;
+              // eslint-disable-next-line no-console
+              console.info("[altastata] event received -> reloading view");
+              setReloadToken((prev) => prev + 1);
+              const handle = window.setTimeout(() => {
+                followUpHandles.delete(handle);
+                if (cancelled) return;
+                // eslint-disable-next-line no-console
+                console.info("[altastata] follow-up refresh after event lag");
+                setReloadToken((prev) => prev + 1);
+              }, FOLLOWUP_REFRESH_MS);
+              followUpHandles.add(handle);
+            },
+            controller.signal,
+          );
+          if (cancelled) return;
+          // eslint-disable-next-line no-console
+          console.info("[altastata] event stream closed by server");
+        } catch (err) {
+          if (cancelled || controller.signal.aborted) return;
+          // eslint-disable-next-line no-console
+          console.warn("[altastata] event subscription error, reconnecting", err);
+        }
+        if (cancelled) return;
+        await new Promise<void>((resolve) => {
+          retryHandle = window.setTimeout(() => {
+            retryHandle = undefined;
+            resolve();
+          }, RECONNECT_DELAY_MS);
+        });
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+      if (retryHandle !== undefined) window.clearTimeout(retryHandle);
+      followUpHandles.forEach((h) => window.clearTimeout(h));
+      followUpHandles.clear();
+      controller.abort();
+    };
+  }, [account]);
 
   const openSettings = () => {
     setSettingsDraft(getRuntimeSettings());
@@ -128,15 +207,26 @@ export default function App() {
           <Typography variant="caption" sx={{ ml: 1 }}>
             {account?.account_id ?? error ?? "loading..."}
           </Typography>
-          <Tooltip title="Connection settings">
-            <span>
-              <IconButton size="small" onClick={openSettings}>
-                <SettingsIcon fontSize="small" />
-              </IconButton>
-            </span>
-          </Tooltip>
+          <Stack direction="row" spacing={0.5} sx={{ alignItems: "center" }}>
+            <Tooltip title="View log">
+              <span>
+                <IconButton size="small" onClick={() => setLogOpen(true)}>
+                  <TerminalIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+            <Tooltip title="Connection settings">
+              <span>
+                <IconButton size="small" onClick={openSettings}>
+                  <SettingsIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          </Stack>
         </Toolbar>
       </AppBar>
+
+      <LogDialog open={logOpen} onClose={() => setLogOpen(false)} />
 
       <Box sx={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
         <MillerColumns
@@ -164,6 +254,12 @@ export default function App() {
         <DialogTitle>AltaStata Settings</DialogTitle>
         <DialogContent dividers>
           <Stack spacing={1.5} sx={{ mt: 0.5 }}>
+            {/* Self-identifying build header so it is unambiguous which bundle
+                the browser actually loaded (cache-busting questions otherwise
+                require diffing hashed asset names by hand). */}
+            <Typography variant="caption" color="text.secondary">
+              UI build {__APP_VERSION__} · {__APP_BUILD_TIME__}
+            </Typography>
             {settingsStatus && <Alert severity="success">{settingsStatus}</Alert>}
             {settingsError && <Alert severity="error">{settingsError}</Alert>}
 

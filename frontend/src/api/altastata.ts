@@ -99,6 +99,11 @@ message DownloadDirectoryAsZipRequest {
   string cloud_path_prefix = 1;
 }
 message DownloadDirectoryAsZipChunk { bytes data = 1; }
+message SubscribeRequest {}
+message EventMessage {
+  string event_name = 1;
+  string data = 2;
+}
 `;
 
 const root = protobufjs.parse(PROTO_DEF).root;
@@ -362,16 +367,6 @@ let authBootstrapDone = false;
 let authBootstrapInFlight: Promise<void> | null = null;
 let activeAuthUserName = getRuntimeSettings().userName;
 
-function alternateAuthUserName(userName: string): string | null {
-  const normalized = userName.trim();
-  if (!normalized) return null;
-  if (normalized.endsWith("_rsa")) {
-    const plain = normalized.slice(0, -4);
-    return plain || null;
-  }
-  return `${normalized}_rsa`;
-}
-
 async function grpcUnary(
   methodPath: string,
   reqTypeName: string,
@@ -604,6 +599,8 @@ async function ensureAuthBootstrap(): Promise<void> {
     const hasFullBootstrapMaterial = Boolean(config.userProperties && config.privateKey);
     const fullBootstrap = (config.bootstrapMode === "full")
       || (config.bootstrapMode === "auto" && hasFullBootstrapMaterial);
+    // eslint-disable-next-line no-console
+    console.info("[altastata] bootstrap start", { user: bootstrapUser, fullBootstrap });
     if (fullBootstrap) {
       await grpcUnary(
         "altastata.v1.UsersService/SetUserProperties",
@@ -628,9 +625,15 @@ async function ensureAuthBootstrap(): Promise<void> {
       false,
     );
     authBootstrapDone = true;
+    // eslint-disable-next-line no-console
+    console.info("[altastata] bootstrap done", { user: bootstrapUser });
   })();
   try {
     await authBootstrapInFlight;
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error("[altastata] bootstrap failed", String(error));
+    throw error;
   } finally {
     authBootstrapInFlight = null;
   }
@@ -680,25 +683,42 @@ export function isUserNotInitializedError(error: unknown): boolean {
   );
 }
 
+/**
+ * Wraps a single gRPC call with one transparent (re-)bootstrap retry. Used to
+ * make the UI self-healing across:
+ *   - Java backend restarts (in-memory user registry is empty, so the first
+ *     call after restart is rejected with status=16 / "Invalid token").
+ *   - status=9 / "User is not initialized" (user is in the registry but
+ *     SetPasswordForUser hasn't been called yet, so AltaStataFileSystem is
+ *     null).
+ *   - Various "password is null" / "call setPassword first" variants that the
+ *     gateway raises when state is partial.
+ *
+ * The retry strategy is deliberately simple: if the current Settings provide
+ * enough material to bootstrap, force a fresh ensureAuthBootstrap() (which
+ * re-runs SetUserProperties + SetPrivateKey + SetPasswordForUser for the
+ * configured user) and retry the call once. We do not silently switch to an
+ * "alternate" user name — that previous heuristic ended up registering
+ * bob123_rsa and friends with half-initialised state and confused everyone.
+ */
 async function withBootstrapRetry<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (/status=16|invalid token|timeout|timed out|failed to fetch/i.test(message)) {
-      const altUser = alternateAuthUserName(activeAuthUserName);
-      if (altUser && altUser !== activeAuthUserName) {
-        activeAuthUserName = altUser;
-        authBootstrapDone = false;
-        if (canBootstrapFromEnv()) {
-          await ensureAuthBootstrap();
-        }
-        return fn();
-      }
-    }
     const shouldRetry = canBootstrapFromEnv()
-      && (/status=16|invalid token|failed to fetch/i.test(message) || isPasswordBootstrapError(message));
+      && (
+        /\bstatus=16\b/i.test(message)
+        || /\bstatus=9\b/i.test(message)
+        || /invalid token/i.test(message)
+        || /failed to fetch/i.test(message)
+        || /user (?:is|has) not (?:been )?initialized/i.test(message)
+        || isPasswordBootstrapError(message)
+      );
     if (!shouldRetry) throw error;
+    // eslint-disable-next-line no-console
+    console.warn("[altastata] bootstrap retry triggered by:", message);
+    authBootstrapDone = false;
     await ensureAuthBootstrap();
     return fn();
   }
@@ -777,6 +797,8 @@ export async function listDir(path: string): Promise<ListResponse> {
   try {
     const apiPath = normalizePath(path);
     const cloudPrefix = toCloudPath(apiPath);
+    // eslint-disable-next-line no-console
+    console.info("[altastata] listDir", { path: apiPath, cloudPrefix });
     const groups = await withBootstrapRetry(() => grpcServerStream(
       "altastata.v1.FileOpsService/ListVersions",
       "ListVersionsRequest",
@@ -830,6 +852,8 @@ export async function listDir(path: string): Promise<ListResponse> {
     entries.push(...fileEntries);
     return { path: apiPath, entries };
   } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error("[altastata] listDir failed", { path, error: String(error) });
     throw authHint(error);
   }
 }
@@ -1012,6 +1036,8 @@ export async function uploadFile(targetPath: string, content: Uint8Array): Promi
   try {
     await maybeBootstrap();
     const cloudPath = toCloudPath(targetPath);
+    // eslint-disable-next-line no-console
+    console.info("[altastata] uploadFile", { targetPath, cloudPath, bytes: content.length });
     const resp = await withBootstrapRetry(() => grpcUnary(
         "altastata.v1.FileOpsService/CreateFile",
         "CreateFileRequest",
@@ -1032,6 +1058,8 @@ export async function deletePath(path: string): Promise<void> {
   try {
     await maybeBootstrap();
     const cloudPath = toCloudPath(path);
+    // eslint-disable-next-line no-console
+    console.info("[altastata] deletePath", { path, cloudPath });
     const resp = await withBootstrapRetry(() => grpcUnary(
         "altastata.v1.FileOpsService/Delete",
         "DeleteRequest",
@@ -1061,6 +1089,8 @@ export async function sharePaths(paths: string[], readers: string[]): Promise<vo
     await maybeBootstrap();
     const cloudPaths = paths.map((p) => toCloudPath(p)).filter(Boolean);
     if (cloudPaths.length === 0) return;
+    // eslint-disable-next-line no-console
+    console.info("[altastata] sharePaths", { paths: cloudPaths, readers });
     const resp = await withBootstrapRetry(() => grpcUnary(
         "altastata.v1.SharingService/Share",
         "ShareRequest",
@@ -1085,6 +1115,8 @@ export async function revokePaths(paths: string[], readers: string[]): Promise<v
     await maybeBootstrap();
     const cloudPaths = paths.map((p) => toCloudPath(p)).filter(Boolean);
     if (cloudPaths.length === 0) return;
+    // eslint-disable-next-line no-console
+    console.info("[altastata] revokePaths", { paths: cloudPaths, readers });
     const resp = await withBootstrapRetry(() => grpcUnary(
         "altastata.v1.SharingService/Revoke",
         "RevokeRequest",
@@ -1138,7 +1170,52 @@ export async function listKnownUsers(): Promise<string[]> {
   }
 }
 
+export interface AltaStataEvent {
+  eventName: string;
+  data: string;
+}
+
+/**
+ * Subscribe to AltaStata events delivered through the long-running
+ * `EventsService/Subscribe` server stream. The backend fires events such as
+ * `SHARE` (a file was shared with the current user) and `DELETE` (a file was
+ * revoked from / deleted for the current user); the frontend uses them to
+ * auto-refresh the file list without polling.
+ *
+ * The promise resolves when the stream ends cleanly (typically only on
+ * cancellation via `signal.abort()`) and rejects with the underlying error if
+ * the connection is lost. Callers are expected to reconnect with backoff.
+ *
+ * Idle timeout is set far above any realistic quiet period so that long
+ * stretches without events do not abort the stream; we still rely on TCP /
+ * HTTP-2 keepalives at the transport layer.
+ */
+export async function subscribeToAltaStataEvents(
+  onEvent: (event: AltaStataEvent) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  await maybeBootstrap();
+  const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+  await withBootstrapRetry(() => grpcServerStreamWithCallback(
+    "altastata.v1.EventsService/Subscribe",
+    "SubscribeRequest",
+    {},
+    "EventMessage",
+    true,
+    (msg) => {
+      const eventName = typeof msg.eventName === "string" ? msg.eventName : "";
+      const data = typeof msg.data === "string" ? msg.data : "";
+      // eslint-disable-next-line no-console
+      console.info("[altastata] event message", { eventName, data });
+      onEvent({ eventName, data });
+    },
+    { signal, idleTimeoutMs: ONE_DAY_MS },
+  ));
+}
+
 export async function downloadFile(path: string, version: string | null): Promise<Blob> {
+  // eslint-disable-next-line no-console
+  console.info("[altastata] downloadFile", { path, version });
   return fetchPreviewBlob(path, version, null);
 }
 
@@ -1157,6 +1234,8 @@ export async function streamDirectoryZip(
   try {
     await maybeBootstrap();
     const cloudPath = toCloudPath(path);
+    // eslint-disable-next-line no-console
+    console.info("[altastata] streamDirectoryZip", { path, cloudPath });
     await withBootstrapRetry(() => grpcServerStreamWithCallback(
       "altastata.v1.FileOpsService/DownloadDirectoryAsZip",
       "DownloadDirectoryAsZipRequest",
