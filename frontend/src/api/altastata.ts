@@ -984,13 +984,21 @@ export async function fetchFilePreviewMetadata(
   try {
     await maybeBootstrap();
     const cloudPath = toCloudPath(path);
-    const snapshotTime = parseVersionTimestamp(version) ?? 0;
-    const attrs = await withBootstrapRetry(() => getAttributes(cloudPath, ["size", "readers"], snapshotTime));
-    const normalizedSize = (attrs.size ?? "").replace(/,/g, "").trim();
+    const versionSnapshot = parseVersionTimestamp(version) ?? 0;
+    // Query size at the version's snapshot (immutable per version).
+    // Query readers without a snapshot so the response reflects the LIVE ACL,
+    // which is what the user expects to see right after Share / Revoke. If we
+    // re-used `versionSnapshot` here, sharing a file post-creation would not
+    // show up in the preview pane until a new version was written.
+    const [sizeAttrs, readerAttrs] = await Promise.all([
+      withBootstrapRetry(() => getAttributes(cloudPath, ["size"], versionSnapshot)),
+      withBootstrapRetry(() => getAttributes(cloudPath, ["readers"], 0)),
+    ]);
+    const normalizedSize = (sizeAttrs.size ?? "").replace(/,/g, "").trim();
     const size = normalizedSize && /^\d+$/.test(normalizedSize) ? Number(normalizedSize) : null;
-    const sizeRaw = attrs.size?.trim() ? attrs.size.trim() : null;
+    const sizeRaw = sizeAttrs.size?.trim() ? sizeAttrs.size.trim() : null;
     const tag = parseVersionTag(version);
-    const readersRaw = attrs.readers?.trim() ?? "";
+    const readersRaw = readerAttrs.readers?.trim() ?? "";
     const readers = readersRaw
       ? readersRaw.split(/[;,\n]/).map((item) => item.trim()).filter(Boolean)
       : [];

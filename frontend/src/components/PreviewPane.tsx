@@ -10,6 +10,13 @@ import type { FileEntry } from "@/types";
 
 interface Props {
   file: FileEntry | null;
+  /**
+   * Bumped by the parent whenever the surrounding file list is reloaded
+   * (e.g. after Share / Revoke / Delete / Upload). The file's path+version
+   * are stable across an ACL change, so we cannot rely on `file` identity
+   * alone to refresh server-side metadata such as the readers list.
+   */
+  refreshToken?: number;
 }
 
 const TEXT_PREVIEW_CHUNK_BYTES = 4 * 1024;
@@ -25,7 +32,7 @@ function clampTextPreview(value: string): string {
   return `${value.slice(0, MAX_INLINE_TEXT_CHARS)}\n\n... preview truncated ...`;
 }
 
-export default function PreviewPane({ file }: Props) {
+export default function PreviewPane({ file, refreshToken = 0 }: Props) {
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
   const [textPreview, setTextPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -52,7 +59,7 @@ export default function PreviewPane({ file }: Props) {
     return () => {
       disposed = true;
     };
-  }, [file]);
+  }, [file, refreshToken]);
 
   useEffect(() => {
     if (!file || file.is_dir) {

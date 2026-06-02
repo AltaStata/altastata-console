@@ -432,6 +432,15 @@ export default function BottomToolbar({ selectedEntries, activePath, onRefresh }
         await revokePaths(paths, [reader]);
       }
     });
+    // Share is processed asynchronously by the AltaStata msgqueue / SecureCloudEventProcessor:
+    // the gRPC call returns as soon as the ADDREADER message is queued, so the file's "readers"
+    // attribute does not yet reflect the new reader when the immediate refresh fires. Schedule a
+    // couple of follow-up refreshes so the preview pane catches up without the user having to
+    // re-click the file. Revoke is applied synchronously, so no follow-up is needed.
+    if (mode === "share") {
+      window.setTimeout(() => onRefresh(), 1500);
+      window.setTimeout(() => onRefresh(), 4000);
+    }
   };
 
   return (
