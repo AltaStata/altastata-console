@@ -592,6 +592,36 @@ function isPasswordBootstrapError(message: string): boolean {
   return /password is null|call setpassword first|set password for user failed|account_password cannot be empty/i.test(message);
 }
 
+/**
+ * Returns true when a gRPC error indicates the user has not finished setting
+ * up authentication for this AltaStata account in the current session — most
+ * commonly because the password is missing in Settings, or because a stale
+ * token has been rejected by the gateway. In both cases the remediation is
+ * the same (open Settings → fill / verify password → Save & Run Bootstrap),
+ * so the UI uses this single signal to decide whether to show the
+ * "set your password" empty state instead of a generic error.
+ *
+ * Matches:
+ *   - `gRPC status=9 ...` (FAILED_PRECONDITION; AltaStata raises this from
+ *     listDir / read / etc. when the password has never been set)
+ *   - `gRPC status=16 ...` / "Invalid token" (UNAUTHENTICATED; raised when
+ *     no token is presented or the token has expired/changed)
+ *   - "User is not initialized" / "User has not been initialized"
+ *   - The same patterns recognised by withBootstrapRetry's password fallback
+ *     (Password is null, call setPassword first, account_password cannot be
+ *     empty).
+ */
+export function isUserNotInitializedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    /\bstatus=9\b/i.test(message)
+    || /\bstatus=16\b/i.test(message)
+    || /invalid token/i.test(message)
+    || /user (?:is|has) not (?:been )?initialized/i.test(message)
+    || isPasswordBootstrapError(message)
+  );
+}
+
 async function withBootstrapRetry<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();

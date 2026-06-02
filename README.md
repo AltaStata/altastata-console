@@ -35,6 +35,8 @@ altastata-console/
 │       ├── api/altastata.ts        ← typed API client (gRPC-Web)
 │       ├── theme/index.ts          ← MUI theme matching JavaFX look
 │       └── types/index.ts          ← shared TS types
+├── scripts/
+│   └── prevent-secrets-commit.sh   ← optional pre-commit secret guard
 └── docs/architecture.md
 ```
 
