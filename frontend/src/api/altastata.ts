@@ -1126,3 +1126,46 @@ export function resolveUploadTargetPath(
   const baseDir = selectedEntry ? parentPath(selectedEntry.path) : normalizePath(activePath);
   return `${normalizePath(baseDir)}/${fileName}`.replace("//", "/");
 }
+
+/**
+ * Returns `name` if it is not present in `used`, otherwise appends a numeric
+ * suffix before the extension (e.g. `report (2).pdf`) until it is unique.
+ * Mutates `used` to claim the resulting name.
+ */
+export function makeUniqueArchiveName(name: string, used: Set<string>): string {
+  if (!used.has(name)) {
+    used.add(name);
+    return name;
+  }
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let i = 2; i < 10_000; i += 1) {
+    const candidate = `${stem} (${i})${ext}`;
+    if (!used.has(candidate)) {
+      used.add(candidate);
+      return candidate;
+    }
+  }
+  // Pathological fallback — should never happen in practice.
+  const fallback = `${stem}-${Date.now()}${ext}`;
+  used.add(fallback);
+  return fallback;
+}
+
+/**
+ * Suggests a name for a multi-item ZIP archive. If every selected entry
+ * shares the same parent directory (and that parent is not root), the parent
+ * name is reused; otherwise a generic fallback is returned.
+ */
+export function suggestMultiZipName(entries: ReadonlyArray<{ path: string }>): string {
+  if (entries.length === 0) return "altastata-download.zip";
+  const parents = entries.map((e) => parentPath(e.path));
+  const first = parents[0];
+  const allSame = parents.every((p) => p === first);
+  if (allSame && first && first !== "/") {
+    const last = first.split("/").filter(Boolean).pop();
+    if (last) return `${last}.zip`;
+  }
+  return `altastata-download-${entries.length}-items.zip`;
+}

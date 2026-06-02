@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   isUserNotInitializedError,
+  makeUniqueArchiveName,
   resolveUploadTargetPath,
   runWithConcurrency,
+  suggestMultiZipName,
 } from "./altastata";
 import type { FileEntry } from "@/types";
 
@@ -217,5 +219,82 @@ describe("runWithConcurrency", () => {
     ).rejects.toThrow("boom");
     // Only the two initially-dispatched workers ran; abort prevented 2..7.
     expect(startedIndices.sort((a, b) => a - b)).toEqual([0, 1]);
+  });
+});
+
+describe("makeUniqueArchiveName", () => {
+  it("returns the original name when it is not yet used", () => {
+    const used = new Set<string>();
+    expect(makeUniqueArchiveName("a.txt", used)).toBe("a.txt");
+    expect(used.has("a.txt")).toBe(true);
+  });
+
+  it("appends a numeric suffix before the extension on collision", () => {
+    const used = new Set<string>(["a.txt"]);
+    expect(makeUniqueArchiveName("a.txt", used)).toBe("a (2).txt");
+    expect(makeUniqueArchiveName("a.txt", used)).toBe("a (3).txt");
+  });
+
+  it("handles names without an extension", () => {
+    const used = new Set<string>(["README"]);
+    expect(makeUniqueArchiveName("README", used)).toBe("README (2)");
+  });
+
+  it("handles dotfiles (treats the leading dot as the stem)", () => {
+    const used = new Set<string>([".env"]);
+    // ".env" has no extension separator past index 0, so we keep the whole
+    // string as the stem and add the suffix at the end.
+    expect(makeUniqueArchiveName(".env", used)).toBe(".env (2)");
+  });
+
+  it("preserves multi-dot extensions like .tar.gz", () => {
+    const used = new Set<string>(["dump.tar.gz"]);
+    // We split at the LAST dot, so the suffix lands before .gz. That is the
+    // common file-manager behaviour and is good enough for archive naming.
+    expect(makeUniqueArchiveName("dump.tar.gz", used)).toBe("dump.tar (2).gz");
+  });
+});
+
+describe("suggestMultiZipName", () => {
+  it("falls back to a generic name when entry list is empty", () => {
+    expect(suggestMultiZipName([])).toBe("altastata-download.zip");
+  });
+
+  it("uses the shared parent directory name when all entries share one", () => {
+    expect(
+      suggestMultiZipName([
+        { path: "/photos/a.jpg" },
+        { path: "/photos/b.jpg" },
+        { path: "/photos/sub" },
+      ]),
+    ).toBe("photos.zip");
+  });
+
+  it("uses the deepest shared parent segment for nested directories", () => {
+    expect(
+      suggestMultiZipName([
+        { path: "/projects/site/index.html" },
+        { path: "/projects/site/main.css" },
+      ]),
+    ).toBe("site.zip");
+  });
+
+  it("falls back to a count-based name when parents differ", () => {
+    expect(
+      suggestMultiZipName([
+        { path: "/a/x.txt" },
+        { path: "/b/y.txt" },
+      ]),
+    ).toBe("altastata-download-2-items.zip");
+  });
+
+  it("falls back when entries live directly under root", () => {
+    // Common parent is "/", which we treat as too generic to name the archive.
+    expect(
+      suggestMultiZipName([
+        { path: "/x.txt" },
+        { path: "/y.txt" },
+      ]),
+    ).toBe("altastata-download-2-items.zip");
   });
 });

@@ -11,16 +11,23 @@ interface ColumnState {
   path: string;
   title: string;
   entries: FileEntry[];
-  selected: FileEntry | null;
+  selectedPaths: Set<string>;
+  anchor: FileEntry | null;
+}
+
+interface SelectModifiers {
+  ctrl: boolean;
+  shift: boolean;
 }
 
 interface SelectOptions {
   focusNextColumn?: boolean;
+  modifiers?: SelectModifiers;
 }
 
 interface Props {
   reloadToken?: number;
-  onSelectionContextChange?: (selected: FileEntry | null, activePath: string) => void;
+  onSelectionContextChange?: (selectedEntries: FileEntry[], activePath: string) => void;
   onOpenSettings?: () => void;
 }
 
@@ -44,6 +51,16 @@ export default function MillerColumns({
   const [rootError, setRootError] = useState<Error | null>(null);
   const latestNavRequestRef = useRef(0);
 
+  // Snapshot of the latest nav state so a refresh (e.g. after delete) can
+  // restore the user's position instead of collapsing back to root.
+  const navSnapshotRef = useRef<{ columns: ColumnState[]; activeColumnIdx: number }>({
+    columns: [],
+    activeColumnIdx: 0,
+  });
+  useEffect(() => {
+    navSnapshotRef.current = { columns, activeColumnIdx };
+  }, [columns, activeColumnIdx]);
+
   const sortEntries = useCallback((entries: FileEntry[]) => {
     return [...entries].sort((a, b) => {
       if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
@@ -57,14 +74,15 @@ export default function MillerColumns({
     return parts[parts.length - 1] ?? path;
   }, []);
 
-  const loadColumn = useCallback(async (path: string) => {
+  const loadColumn = useCallback(async (path: string): Promise<ColumnState> => {
     const data = await listDir(path);
     return {
       path,
       title: getColumnTitle(path),
       entries: sortEntries(data.entries),
-      selected: null,
-    } as ColumnState;
+      selectedPaths: new Set<string>(),
+      anchor: null,
+    };
   }, [getColumnTitle, sortEntries]);
 
   const getColumnDefaultSize = useCallback((count: number) => {
@@ -75,19 +93,51 @@ export default function MillerColumns({
 
   useEffect(() => {
     let mounted = true;
-    loadColumn("/")
-      .then((col) => {
-        if (!mounted) return;
-        setColumns([col]);
-        setPreviewFile(null);
+    const { columns: prevColumns, activeColumnIdx: prevActiveIdx } = navSnapshotRef.current;
+
+    (async () => {
+      try {
+        // Reload every previously-open column (or just root on first mount).
+        // If a child folder is gone we truncate the chain at that point.
+        const paths = prevColumns.length ? prevColumns.map((c) => c.path) : ["/"];
+        const restored: ColumnState[] = [];
+        for (const path of paths) {
+          try {
+            restored.push(await loadColumn(path));
+          } catch (e) {
+            if (path === "/") throw e;
+            break;
+          }
+          if (!mounted) return;
+        }
+
+        // Carry per-column selection forward; drop entries that no longer exist.
+        for (let i = 0; i < restored.length; i += 1) {
+          const prev = prevColumns[i];
+          if (!prev) continue;
+          const present = new Set(restored[i].entries.map((e) => e.path));
+          restored[i] = {
+            ...restored[i],
+            selectedPaths: new Set([...prev.selectedPaths].filter((p) => present.has(p))),
+            anchor: prev.anchor && present.has(prev.anchor.path)
+              ? restored[i].entries.find((e) => e.path === prev.anchor!.path) ?? null
+              : null,
+          };
+        }
+
+        const nextActive = Math.max(0, Math.min(prevActiveIdx, restored.length - 1));
+        setColumns(restored);
+        setActiveColumnIdx(nextActive);
+        setPreviewFile(restored[nextActive]?.anchor ?? null);
         setRootError(null);
-      })
-      .catch((error: unknown) => {
+      } catch (error) {
         if (!mounted) return;
         setColumns([]);
         setPreviewFile(null);
         setRootError(error instanceof Error ? error : new Error(String(error)));
-      });
+      }
+    })();
+
     return () => {
       mounted = false;
     };
@@ -100,9 +150,12 @@ export default function MillerColumns({
   useEffect(() => {
     if (!onSelectionContextChange) return;
     const activeCol = columns[activeColumnIdx] ?? columns[columns.length - 1];
-    const selected = activeCol?.selected ?? null;
-    const activePath = selected?.is_dir ? selected.path : (activeCol?.path ?? "/");
-    onSelectionContextChange(selected, activePath);
+    const anchor = activeCol?.anchor ?? null;
+    const selectedEntries = activeCol
+      ? activeCol.entries.filter((e) => activeCol.selectedPaths.has(e.path))
+      : [];
+    const activePath = anchor?.is_dir ? anchor.path : (activeCol?.path ?? "/");
+    onSelectionContextChange(selectedEntries, activePath);
   }, [activeColumnIdx, columns, onSelectionContextChange]);
 
   const handleSelect = useCallback(async (
@@ -110,48 +163,95 @@ export default function MillerColumns({
     entry: FileEntry,
     options: SelectOptions = {},
   ) => {
-    const navRequestId = ++latestNavRequestRef.current;
-    setActiveColumnIdx(colIdx);
-    setColumns((prev) => {
-      if (!prev[colIdx]) return prev;
-      const nextColumns = prev.slice(0, colIdx + 1);
-      nextColumns[colIdx] = { ...nextColumns[colIdx], selected: entry };
-      return nextColumns;
-    });
+    const modifiers = options.modifiers ?? { ctrl: false, shift: false };
+    const isMultiClick = modifiers.ctrl || modifiers.shift;
 
+    setActiveColumnIdx(colIdx);
     setPreviewFile(entry);
-    if (!entry.is_dir) {
+
+    if (isMultiClick) {
+      // Multi-select within the same column. Do not drill into folders, do not
+      // prune later columns; the user is just refining the selection.
+      setColumns((prev) => {
+        const col = prev[colIdx];
+        if (!col) return prev;
+
+        let nextSelectedPaths: Set<string>;
+        let nextAnchor: FileEntry | null = entry;
+
+        if (modifiers.shift && col.anchor) {
+          const anchorIndex = col.entries.findIndex((e) => e.path === col.anchor!.path);
+          const targetIndex = col.entries.findIndex((e) => e.path === entry.path);
+          if (anchorIndex >= 0 && targetIndex >= 0) {
+            const [lo, hi] = anchorIndex < targetIndex
+              ? [anchorIndex, targetIndex]
+              : [targetIndex, anchorIndex];
+            nextSelectedPaths = new Set(col.entries.slice(lo, hi + 1).map((e) => e.path));
+            nextAnchor = col.anchor;
+          } else {
+            nextSelectedPaths = new Set([entry.path]);
+          }
+        } else {
+          nextSelectedPaths = new Set(col.selectedPaths);
+          if (nextSelectedPaths.has(entry.path)) {
+            nextSelectedPaths.delete(entry.path);
+          } else {
+            nextSelectedPaths.add(entry.path);
+          }
+        }
+
+        const next = [...prev];
+        next[colIdx] = { ...col, selectedPaths: nextSelectedPaths, anchor: nextAnchor };
+        return next;
+      });
       return;
     }
 
-    if (entry.is_dir) {
-      try {
-        const next = await loadColumn(entry.path);
-        if (navRequestId !== latestNavRequestRef.current) return;
+    // Plain click: replace selection, prune later columns, drill into folder.
+    const navRequestId = ++latestNavRequestRef.current;
+    setColumns((prev) => {
+      if (!prev[colIdx]) return prev;
+      const nextColumns = prev.slice(0, colIdx + 1);
+      nextColumns[colIdx] = {
+        ...nextColumns[colIdx],
+        selectedPaths: new Set([entry.path]),
+        anchor: entry,
+      };
+      return nextColumns;
+    });
 
-        setColumns((prev) => {
-          if (!prev[colIdx]) return prev;
-          if (prev[colIdx].selected?.path !== entry.path) return prev;
-          const nextColumns = prev.slice(0, colIdx + 1);
-          nextColumns[colIdx] = { ...nextColumns[colIdx], selected: entry };
-          nextColumns.push(next);
-          return nextColumns;
-        });
+    if (!entry.is_dir) return;
 
-        if (options.focusNextColumn) {
-          setActiveColumnIdx(colIdx + 1);
-        }
-      } catch {
-        setColumns((prev) => prev.slice(0, colIdx + 1));
+    try {
+      const next = await loadColumn(entry.path);
+      if (navRequestId !== latestNavRequestRef.current) return;
+
+      setColumns((prev) => {
+        if (!prev[colIdx]) return prev;
+        if (prev[colIdx].anchor?.path !== entry.path) return prev;
+        const nextColumns = prev.slice(0, colIdx + 1);
+        nextColumns[colIdx] = {
+          ...nextColumns[colIdx],
+          selectedPaths: new Set([entry.path]),
+          anchor: entry,
+        };
+        nextColumns.push(next);
+        return nextColumns;
+      });
+
+      if (options.focusNextColumn) {
+        setActiveColumnIdx(colIdx + 1);
       }
+    } catch {
+      setColumns((prev) => prev.slice(0, colIdx + 1));
     }
   }, [loadColumn]);
 
   const moveSelection = useCallback((delta: number) => {
     const column = columns[activeColumnIdx];
     if (!column || column.entries.length === 0) return;
-    const currentIndex = column.selected
-      ? column.entries.findIndex((entry) => entry.path === column.selected?.path)
+    const currentIndex = column.anchor
+      ? column.entries.findIndex((entry) => entry.path === column.anchor!.path)
       : -1;
     const nextIndex = currentIndex < 0
       ? (delta >= 0 ? 0 : column.entries.length - 1)
@@ -164,8 +264,8 @@ export default function MillerColumns({
   const openSelected = useCallback((focusNextColumn: boolean) => {
     const column = columns[activeColumnIdx];
     if (!column || column.entries.length === 0) return;
-    const selected = column.selected ?? column.entries[0];
-    void handleSelect(activeColumnIdx, selected, { focusNextColumn });
+    const target = column.anchor ?? column.entries[0];
+    void handleSelect(activeColumnIdx, target, { focusNextColumn });
   }, [activeColumnIdx, columns, handleSelect]);
 
   const handleKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
@@ -246,7 +346,7 @@ export default function MillerColumns({
           bgcolor: "background.default",
         }}
       >
-        Navigation: Up/Down select, Right or Enter open, Left go back
+        Navigation: Up/Down select, Right or Enter open, Left go back. Multi-select: Cmd/Ctrl+click toggles, Shift+click selects a range.
       </Box>
       <Box sx={{ flex: 1, minHeight: 0, direction: "ltr" }}>
         <PanelGroup
@@ -266,9 +366,9 @@ export default function MillerColumns({
                   title={col.title}
                   isActive={idx === activeColumnIdx}
                   entries={col.entries}
-                  selected={col.selected}
+                  selectedPaths={col.selectedPaths}
                   onActivate={() => setActiveColumnIdx(idx)}
-                  onSelect={(e) => void handleSelect(idx, e)}
+                  onSelect={(e, modifiers) => void handleSelect(idx, e, { modifiers })}
                 />
               </Panel>
               <PanelResizeHandle
