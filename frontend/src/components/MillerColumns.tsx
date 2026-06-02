@@ -1,7 +1,8 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import { Box } from "@mui/material";
-import { listDir } from "@/api/altastata";
+import { Box, Button, Stack, Typography } from "@mui/material";
+import SettingsIcon from "@mui/icons-material/Settings";
+import { isUserNotInitializedError, listDir } from "@/api/altastata";
 import type { FileEntry } from "@/types";
 import FileColumn from "./FileColumn";
 import PreviewPane from "./PreviewPane";
@@ -20,6 +21,7 @@ interface SelectOptions {
 interface Props {
   reloadToken?: number;
   onSelectionContextChange?: (selected: FileEntry | null, activePath: string) => void;
+  onOpenSettings?: () => void;
 }
 
 /**
@@ -34,10 +36,12 @@ interface Props {
 export default function MillerColumns({
   reloadToken = 0,
   onSelectionContextChange,
+  onOpenSettings,
 }: Props) {
   const [columns, setColumns] = useState<ColumnState[]>([]);
   const [previewFile, setPreviewFile] = useState<FileEntry | null>(null);
   const [activeColumnIdx, setActiveColumnIdx] = useState(0);
+  const [rootError, setRootError] = useState<Error | null>(null);
   const latestNavRequestRef = useRef(0);
 
   const sortEntries = useCallback((entries: FileEntry[]) => {
@@ -76,11 +80,13 @@ export default function MillerColumns({
         if (!mounted) return;
         setColumns([col]);
         setPreviewFile(null);
+        setRootError(null);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (!mounted) return;
         setColumns([]);
         setPreviewFile(null);
+        setRootError(error instanceof Error ? error : new Error(String(error)));
       });
     return () => {
       mounted = false;
@@ -183,6 +189,49 @@ export default function MillerColumns({
       setActiveColumnIdx((prev) => Math.max(0, prev - 1));
     }
   }, [moveSelection, openSelected]);
+
+  if (rootError && columns.length === 0) {
+    const needsPassword = isUserNotInitializedError(rootError);
+    return (
+      <Box
+        sx={{
+          height: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          p: 4,
+          bgcolor: "background.default",
+        }}
+      >
+        <Stack
+          spacing={1.5}
+          alignItems="center"
+          sx={{ maxWidth: 520, textAlign: "center" }}
+        >
+          <Typography variant="subtitle1">
+            {needsPassword
+              ? "Set your password to access files"
+              : "Cannot load files"}
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            {needsPassword
+              ? "Open Settings, fill in (or verify) your password, then click Save & Run Bootstrap."
+              : rootError.message}
+          </Typography>
+          {onOpenSettings && (
+            <Button
+              variant="contained"
+              size="small"
+              startIcon={<SettingsIcon fontSize="small" />}
+              onClick={onOpenSettings}
+            >
+              Open Settings
+            </Button>
+          )}
+        </Stack>
+      </Box>
+    );
+  }
 
   return (
     <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }} onKeyDown={handleKeyDown}>

@@ -145,6 +145,7 @@ export default function App() {
             setSelectedEntry(selected);
             setActivePath(currentPath);
           }}
+          onOpenSettings={openSettings}
         />
       </Box>
 
