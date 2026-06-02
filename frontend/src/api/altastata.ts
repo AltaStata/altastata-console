@@ -1008,14 +1008,32 @@ export async function fetchFilePreviewMetadata(
   try {
     await maybeBootstrap();
     const cloudPath = toCloudPath(path);
+    // We must send BOTH the version-suffixed path (`✹tag_createTime`) AND the
+    // exact `snapshotTime`. Reasons:
+    //   * AltaStataFileSystem.getFileAttributes() with a `✹`-suffixed path
+    //     takes the "fast path" and parses a CloudFile that holds exactly one
+    //     VersionAttributes (the one we asked for). It then calls
+    //     SecureCloudFileSystemModel.getDataAttributesForCloudFile(cloudFile,
+    //     createTime, names) which calls
+    //     CloudFile.getBestMatchingVersionAttributes(long timestamp).
+    //   * If we pass snapshotTime=0 the gRPC service converts it to a
+    //     java.lang.Long null, and Scala's BoxesRunTime.unboxToLong(null)
+    //     silently yields 0L. The Java method then compares each version's
+    //     createTime (e.g. 1735834189000) against 0 and never matches, so it
+    //     returns null. The Scala model treats that as "no version found" and
+    //     substitutes the stub value "-1" for the "size" attribute — exactly
+    //     the bug the preview pane used to render as "Size: -1".
+    //   * Sending the version's createTime as snapshotTime makes the lookup
+    //     deterministic and returns the real stored size.
+    //
+    // Readers are still queried on the bare path with snapshotTime=0 so we get
+    // the LIVE ACL (what the user expects right after Share / Revoke). If we
+    // pinned the readers query to the version's snapshot, sharing a file
+    // post-creation would not show up here until a new version was written.
     const versionSnapshot = parseVersionTimestamp(version) ?? 0;
-    // Query size at the version's snapshot (immutable per version).
-    // Query readers without a snapshot so the response reflects the LIVE ACL,
-    // which is what the user expects to see right after Share / Revoke. If we
-    // re-used `versionSnapshot` here, sharing a file post-creation would not
-    // show up in the preview pane until a new version was written.
+    const sizePath = version ? `${cloudPath}✹${version}` : cloudPath;
     const [sizeAttrs, readerAttrs] = await Promise.all([
-      withBootstrapRetry(() => getAttributes(cloudPath, ["size"], versionSnapshot)),
+      withBootstrapRetry(() => getAttributes(sizePath, ["size"], versionSnapshot)),
       withBootstrapRetry(() => getAttributes(cloudPath, ["readers"], 0)),
     ]);
     const normalizedSize = (sizeAttrs.size ?? "").replace(/,/g, "").trim();
