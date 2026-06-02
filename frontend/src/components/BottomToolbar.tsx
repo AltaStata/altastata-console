@@ -13,6 +13,7 @@ import DeleteIcon from "@mui/icons-material/Delete";
 import SearchIcon from "@mui/icons-material/Search";
 import DownloadIcon from "@mui/icons-material/Download";
 import UploadIcon from "@mui/icons-material/Upload";
+import DriveFolderUploadIcon from "@mui/icons-material/DriveFolderUpload";
 import ShareIcon from "@mui/icons-material/Share";
 import LockIcon from "@mui/icons-material/Lock";
 import GridViewIcon from "@mui/icons-material/GridView";
@@ -21,11 +22,14 @@ import {
   deletePath,
   downloadFile,
   resolveUploadTargetPath,
+  runWithConcurrency,
   sharePaths,
   streamDirectoryZip,
   suggestedZipFileName,
   uploadFile,
 } from "@/api/altastata";
+
+const FOLDER_UPLOAD_CONCURRENCY = 4;
 import type { FileEntry } from "@/types";
 
 interface Props {
@@ -54,6 +58,7 @@ type SavePickerWindow = Window & {
 
 export default function BottomToolbar({ selectedEntry, activePath, onRefresh }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string>("Ready");
   const [filterText, setFilterText] = useState("");
@@ -94,6 +99,38 @@ export default function BottomToolbar({ selectedEntry, activePath, onRefresh }: 
       await uploadFile(targetPath, bytes);
     });
     event.target.value = "";
+  };
+
+  const handleUploadFolderClick = () => {
+    if (busy) return;
+    folderInputRef.current?.click();
+  };
+
+  const handleUploadFolderSelected = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (files.length === 0) return;
+
+    setBusy(true);
+    let completed = 0;
+    setStatus(`Uploading folder (0/${files.length}, ×${FOLDER_UPLOAD_CONCURRENCY})...`);
+    try {
+      await runWithConcurrency(files, FOLDER_UPLOAD_CONCURRENCY, async (file) => {
+        const relativePath = file.webkitRelativePath || file.name;
+        const targetPath = resolveUploadTargetPath(relativePath, selectedEntry, activePath);
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        await uploadFile(targetPath, bytes);
+        completed += 1;
+        setStatus(`Uploading folder (${completed}/${files.length}, ×${FOLDER_UPLOAD_CONCURRENCY})...`);
+      });
+      setStatus(`Folder upload done (${completed}/${files.length})`);
+      onRefresh();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setStatus(`Folder upload failed after ${completed}/${files.length}: ${detail}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const startBrowserDownload = (href: string, downloadName: string) => {
@@ -290,6 +327,13 @@ export default function BottomToolbar({ selectedEntry, activePath, onRefresh }: 
               </IconButton>
             </span>
           </Tooltip>
+          <Tooltip title="Upload folder (preserves subdirectory structure)">
+            <span>
+              <IconButton size="small" disabled={busy} onClick={handleUploadFolderClick}>
+                <DriveFolderUploadIcon fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
           <Tooltip title="Share selected file">
             <span>
               <IconButton size="small" disabled={busy || !selectedEntry || selectedEntry.is_dir} onClick={() => void handleShare()}>
@@ -340,6 +384,23 @@ export default function BottomToolbar({ selectedEntry, activePath, onRefresh }: 
         type="file"
         style={{ display: "none" }}
         onChange={(e) => void handleUploadSelected(e)}
+      />
+      <input
+        ref={(node) => {
+          folderInputRef.current = node;
+          if (node) {
+            // webkitdirectory / directory are non-standard HTML attributes
+            // (Chrome/Edge/Safari/Firefox all support webkitdirectory). They
+            // are not in React's typed prop set, so we install them
+            // imperatively to avoid casts or @ts-expect-error noise.
+            node.setAttribute("webkitdirectory", "");
+            node.setAttribute("directory", "");
+          }
+        }}
+        type="file"
+        multiple
+        style={{ display: "none" }}
+        onChange={(e) => void handleUploadFolderSelected(e)}
       />
     </Box>
   );

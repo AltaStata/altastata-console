@@ -295,9 +295,58 @@ function guessMime(name: string): string | null {
   if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
   if (lower.endsWith(".gif")) return "image/gif";
   if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".svg")) return "image/svg+xml";
+  if (lower.endsWith(".mp4") || lower.endsWith(".m4v")) return "video/mp4";
+  if (lower.endsWith(".mov")) return "video/quicktime";
+  if (lower.endsWith(".webm")) return "video/webm";
+  if (lower.endsWith(".ogv")) return "video/ogg";
+  if (lower.endsWith(".mp3")) return "audio/mpeg";
+  if (lower.endsWith(".wav")) return "audio/wav";
+  if (lower.endsWith(".ogg") || lower.endsWith(".oga")) return "audio/ogg";
+  if (lower.endsWith(".m4a")) return "audio/mp4";
   if (lower.endsWith(".csv")) return "text/csv";
   if (lower.endsWith(".txt") || lower.endsWith(".md") || lower.endsWith(".log")) return "text/plain";
   return null;
+}
+
+/**
+ * Run async `worker` over `items` with bounded concurrency. The first failure
+ * cancels future task starts, in-flight workers continue but no new ones are
+ * spawned, and the original error is rethrown after all started workers have
+ * settled. Used by the folder upload flow to overlap CreateFile RPCs while
+ * preserving the existing "stop on first error" semantics.
+ */
+export async function runWithConcurrency<T>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) return;
+  const cap = Math.max(1, Math.min(limit, items.length));
+  let nextIndex = 0;
+  let aborted = false;
+  let firstError: unknown = null;
+  const runners: Promise<void>[] = [];
+  for (let i = 0; i < cap; i += 1) {
+    runners.push((async () => {
+      while (!aborted) {
+        const idx = nextIndex;
+        nextIndex += 1;
+        if (idx >= items.length) return;
+        try {
+          await worker(items[idx], idx);
+        } catch (error) {
+          if (!aborted) {
+            aborted = true;
+            firstError = error;
+          }
+          return;
+        }
+      }
+    })());
+  }
+  await Promise.all(runners);
+  if (firstError) throw firstError;
 }
 
 let authBootstrapDone = false;
