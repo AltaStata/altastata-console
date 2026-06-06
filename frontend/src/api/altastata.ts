@@ -25,14 +25,28 @@ message SetPrivateKeyRequest {
   string private_key_encrypted = 2;
 }
 message SetPrivateKeyResponse { bool success = 1; }
-message SetPasswordForUserRequest {
-  string user_name = 1;
-  string account_password = 2;
+// Wire-compatible with google.protobuf.Timestamp (same field numbers); we
+// inline it because protobufjs.parse() of a single-string proto definition
+// cannot resolve cross-package imports.
+message Timestamp {
+  int64 seconds = 1;
+  int32 nanos   = 2;
 }
-message SetPasswordForUserResponse {
-  bool success = 1;
-  string access_key = 2;
-  string secret_key = 3;
+message LoginRequest {
+  string user_name        = 1;
+  string account_password = 2;
+  string client_hint      = 3;
+}
+message LoginResponse {
+  string    session_token = 1;
+  Timestamp expires_at    = 2;
+  string    access_key    = 3;
+}
+message LogoutRequest {}
+message LogoutResponse {}
+message RefreshRequest {}
+message RefreshResponse {
+  Timestamp expires_at = 1;
 }
 message FileStatus {
   string file_path = 1;
@@ -124,10 +138,22 @@ function baseUrl(): string {
   return config.grpcBaseUrl.trim().replace(/\/+$/, "");
 }
 
+/**
+ * Returns the Bearer-eligible session token, or {@code ""} when no Login has
+ * succeeded yet for the current settings. {@link grpcHeaders} omits the
+ * Authorization header on empty token; the gateway then returns
+ * {@code UNAUTHENTICATED} and {@link withBootstrapRetry} kicks in to run a
+ * fresh {@link ensureAuthBootstrap}.
+ *
+ * <p>The previous implementation returned {@code "local-<userName>"} — a
+ * trivially-forgeable identity that any client on the same network could
+ * impersonate. That format is still accepted by the gateway for one
+ * deprecation cycle (it logs a one-shot WARN; see
+ * {@code SESSION_AND_EVENTS_DESIGN.md §11.1}), but the frontend has now
+ * migrated to {@code sess-<random>} server-issued tokens.
+ */
 function token(): string {
-  const config = getRuntimeSettings();
-  const tokenUser = (activeAuthUserName || config.userName).trim();
-  return `local-${tokenUser}`;
+  return sessionToken;
 }
 
 function frameMessage(bytes: Bytes): Bytes {
@@ -192,7 +218,15 @@ function grpcHeaders(withAuth: boolean): Record<string, string> {
     "x-grpc-web": "1",
     "x-user-agent": "altastata-console-web",
   };
-  if (withAuth) headers.authorization = `Bearer ${token()}`;
+  if (withAuth) {
+    const t = token();
+    if (t) headers.authorization = `Bearer ${t}`;
+    // Empty token => no Authorization header. Gateway returns
+    // UNAUTHENTICATED (status=16) and withBootstrapRetry will trigger a fresh
+    // Login. We deliberately do not send "Bearer " (empty) — the
+    // GrpcGatewayAuthInterceptor would treat it as a malformed token and the
+    // log line would be confusing.
+  }
   return headers;
 }
 
@@ -365,7 +399,20 @@ export async function runWithConcurrency<T>(
 
 let authBootstrapDone = false;
 let authBootstrapInFlight: Promise<void> | null = null;
-let activeAuthUserName = getRuntimeSettings().userName;
+
+/**
+ * Authenticated session state. Populated by {@link ensureAuthBootstrap} on a
+ * successful {@code AuthService/Login} and cleared by
+ * {@link applyRuntimeSettings} (settings changed) or {@link logout} (explicit).
+ *
+ * Lives in module scope, never persisted: a page reload returns to the
+ * "no session" state and the user has to re-enter their password — same
+ * security posture as the legacy {@code local-<userName>} flow had with
+ * {@code accountPassword} (which has always been in-memory only).
+ */
+let sessionToken = "";
+let sessionUserName = getRuntimeSettings().userName;
+let sessionExpiresAtMs: number | null = null;
 
 async function grpcUnary(
   methodPath: string,
@@ -397,9 +444,28 @@ async function grpcUnary(
   const parsed = extractFrames(bytes);
   let message: Uint8Array | null = null;
   let trailers = new Map<string, string>();
+  let sawTrailerFrame = false;
   for (const frame of parsed.frames) {
-    if (frame.trailer) trailers = parseTrailers(frame.payload);
-    else message = frame.payload;
+    if (frame.trailer) {
+      sawTrailerFrame = true;
+      trailers = parseTrailers(frame.payload);
+    } else {
+      message = frame.payload;
+    }
+  }
+  if (!sawTrailerFrame) {
+    // Armeria writes grpc-status into HTTP headers (instead of a trailer
+    // frame) when responseObserver.onError fires before any onNext, which
+    // is what AuthService.Login does for wrong-password / missing-args.
+    // Without this fallback the unary path silently treats those as
+    // status=0 with an empty body, which then surfaces as a confusing
+    // "Login response missing session_token" further up the stack.
+    const statusHeader = response.headers.get("grpc-status");
+    if (statusHeader) {
+      trailers = new Map([["grpc-status", statusHeader]]);
+      const msg = response.headers.get("grpc-message");
+      if (msg) trailers.set("grpc-message", msg);
+    }
   }
   const grpcStatus = trailers.get("grpc-status") ?? "0";
   if (grpcStatus !== "0") {
@@ -586,6 +652,46 @@ async function grpcServerStream(
   return out;
 }
 
+/**
+ * Issues an {@code AuthService/Login} RPC with the supplied credentials and
+ * stores the returned {@code sess-<random>} token in module state. Throws if
+ * the response is missing {@code session_token} or if the gateway rejected the
+ * call (typically {@code UNAUTHENTICATED} with {@code "Invalid credentials"}
+ * for a wrong password, {@code FAILED_PRECONDITION} when SetUserProperties /
+ * SetPrivateKey have not been called yet for this user).
+ */
+async function performLogin(userName: string, accountPassword: string): Promise<void> {
+  let resp: Record<string, unknown>;
+  try {
+    resp = await grpcUnary(
+      "altastata.v1.AuthService/Login",
+      "LoginRequest",
+      {
+        userName,
+        accountPassword,
+        clientHint: "altastata-console-web",
+      },
+      "LoginResponse",
+      false,
+    );
+  } catch (error) {
+    // Translate the transport-level "gRPC status=16 message=Invalid
+    // credentials" into a user-facing "Invalid password" while still
+    // letting withBootstrapRetry / isInvalidCredentialsError detect it via
+    // the InvalidPasswordError class.
+    if (isInvalidCredentialsError(error)) throw new InvalidPasswordError();
+    throw error;
+  }
+  const newToken = typeof resp.sessionToken === "string" ? resp.sessionToken : "";
+  if (!newToken) {
+    throw new Error("Login response missing session_token");
+  }
+  sessionToken = newToken;
+  sessionUserName = userName;
+  const expiresAt = resp.expiresAt as { seconds?: number } | undefined;
+  sessionExpiresAtMs = typeof expiresAt?.seconds === "number" ? expiresAt.seconds * 1000 : null;
+}
+
 async function ensureAuthBootstrap(): Promise<void> {
   if (authBootstrapDone) return;
   if (authBootstrapInFlight) {
@@ -594,7 +700,7 @@ async function ensureAuthBootstrap(): Promise<void> {
   }
   authBootstrapInFlight = (async () => {
     const config = getRuntimeSettings();
-    const bootstrapUser = (activeAuthUserName || config.userName).trim();
+    const bootstrapUser = (sessionUserName || config.userName).trim();
     if (!bootstrapUser) throw new Error("No auth user configured");
     const hasFullBootstrapMaterial = Boolean(config.userProperties && config.privateKey);
     const fullBootstrap = (config.bootstrapMode === "full")
@@ -617,16 +723,17 @@ async function ensureAuthBootstrap(): Promise<void> {
         false,
       );
     }
-    await grpcUnary(
-      "altastata.v1.UsersService/SetPasswordForUser",
-      "SetPasswordForUserRequest",
-      { userName: bootstrapUser, accountPassword: config.accountPassword },
-      "SetPasswordForUserResponse",
-      false,
-    );
+    // Replaces the legacy SetPasswordForUser RPC. The gateway issues a fresh
+    // sess-<random> token via SessionRegistry; the previous local-<userName>
+    // formula is gone (see SESSION_AND_EVENTS_DESIGN.md §5).
+    await performLogin(bootstrapUser, config.accountPassword);
     authBootstrapDone = true;
     // eslint-disable-next-line no-console
-    console.info("[altastata] bootstrap done", { user: bootstrapUser });
+    console.info("[altastata] bootstrap done", {
+      user: bootstrapUser,
+      hasSessionToken: Boolean(sessionToken),
+      expiresAtMs: sessionExpiresAtMs,
+    });
   })();
   try {
     await authBootstrapInFlight;
@@ -646,31 +753,69 @@ async function maybeBootstrap(): Promise<void> {
 
 function canBootstrapFromEnv(): boolean {
   const config = getRuntimeSettings();
-  return Boolean((activeAuthUserName || config.userName) && config.accountPassword);
+  return Boolean((sessionUserName || config.userName) && config.accountPassword);
 }
 
 function isPasswordBootstrapError(message: string): boolean {
-  return /password is null|call setpassword first|set password for user failed|account_password cannot be empty/i.test(message);
+  return /password is null|call setpassword first|set password for user failed|account_password cannot be empty|user_name and account_password are required/i.test(message);
+}
+
+/**
+ * Thrown by {@link performLogin} when {@code AuthService/Login} comes back
+ * {@code UNAUTHENTICATED} with description {@code "Invalid credentials"}
+ * (i.e. wrong password). We expose this as a typed error so the UI can show
+ * a clean "Invalid password" message instead of the raw transport-level
+ * {@code "gRPC status=16 message=Invalid credentials"}, while
+ * {@link withBootstrapRetry} can still detect and short-circuit on it via
+ * {@link isInvalidCredentialsError}.
+ */
+export class InvalidPasswordError extends Error {
+  constructor(message = "Invalid password") {
+    super(message);
+    this.name = "InvalidPasswordError";
+  }
+}
+
+/**
+ * Recognises the gateway's response to a wrong password on
+ * {@code AuthService/Login}: {@code UNAUTHENTICATED} (status=16) with the
+ * fixed description {@code "Invalid credentials"}. We detect this so
+ * {@link withBootstrapRetry} can skip its retry loop in this case — running
+ * Login twice with the same wrong password is just noise (and an extra
+ * audit-log line on the server) when we know it cannot succeed.
+ *
+ * Accepts both the typed {@link InvalidPasswordError} thrown by
+ * {@link performLogin} and the raw {@code Error} from {@link grpcUnary}, so
+ * callers don't have to know which layer the error came from.
+ */
+function isInvalidCredentialsError(error: unknown): boolean {
+  if (error instanceof InvalidPasswordError) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /\bstatus=16\b.*invalid credentials/i.test(message);
 }
 
 /**
  * Returns true when a gRPC error indicates the user has not finished setting
  * up authentication for this AltaStata account in the current session — most
- * commonly because the password is missing in Settings, or because a stale
- * token has been rejected by the gateway. In both cases the remediation is
- * the same (open Settings → fill / verify password → Save & Run Bootstrap),
- * so the UI uses this single signal to decide whether to show the
- * "set your password" empty state instead of a generic error.
+ * commonly because the password is missing in Settings, the supplied password
+ * is wrong, or a stale token has been rejected by the gateway. In all of
+ * these cases the remediation is the same (open Settings → fill / verify
+ * password → Save & Run Bootstrap), so the UI uses this single signal to
+ * decide whether to show the "set your password" empty state instead of a
+ * generic error.
  *
  * Matches:
  *   - `gRPC status=9 ...` (FAILED_PRECONDITION; AltaStata raises this from
- *     listDir / read / etc. when the password has never been set)
- *   - `gRPC status=16 ...` / "Invalid token" (UNAUTHENTICATED; raised when
- *     no token is presented or the token has expired/changed)
+ *     listDir / read / etc. when the password has never been set, and from
+ *     AuthService/Login when SetUserProperties / SetPrivateKey have not run
+ *     yet for this user)
+ *   - `gRPC status=16 ...` / "Invalid token" / "Invalid credentials"
+ *     (UNAUTHENTICATED; raised when no token is presented, the token has
+ *     expired/changed, or the password supplied to Login was wrong)
  *   - "User is not initialized" / "User has not been initialized"
  *   - The same patterns recognised by withBootstrapRetry's password fallback
  *     (Password is null, call setPassword first, account_password cannot be
- *     empty).
+ *     empty, user_name and account_password are required).
  */
 export function isUserNotInitializedError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -689,22 +834,30 @@ export function isUserNotInitializedError(error: unknown): boolean {
  *   - Java backend restarts (in-memory user registry is empty, so the first
  *     call after restart is rejected with status=16 / "Invalid token").
  *   - status=9 / "User is not initialized" (user is in the registry but
- *     SetPasswordForUser hasn't been called yet, so AltaStataFileSystem is
+ *     AuthService/Login has not been called yet, so AltaStataFileSystem is
  *     null).
  *   - Various "password is null" / "call setPassword first" variants that the
  *     gateway raises when state is partial.
  *
  * The retry strategy is deliberately simple: if the current Settings provide
  * enough material to bootstrap, force a fresh ensureAuthBootstrap() (which
- * re-runs SetUserProperties + SetPrivateKey + SetPasswordForUser for the
+ * re-runs SetUserProperties + SetPrivateKey + AuthService/Login for the
  * configured user) and retry the call once. We do not silently switch to an
  * "alternate" user name — that previous heuristic ended up registering
  * bob123_rsa and friends with half-initialised state and confused everyone.
+ *
+ * <p>One narrow exception: a wrong password from AuthService/Login surfaces as
+ * {@code status=16 / "Invalid credentials"}; retrying that is pointless and
+ * just doubles the failure rate the user sees. We bubble it directly. See
+ * {@link isInvalidCredentialsError}.
  */
 async function withBootstrapRetry<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (error) {
+    if (isInvalidCredentialsError(error)) {
+      throw error;
+    }
     const message = error instanceof Error ? error.message : String(error);
     const shouldRetry = canBootstrapFromEnv()
       && (
@@ -751,9 +904,21 @@ function authHint(error: unknown): Error {
   return new Error(message);
 }
 
+/**
+ * Resets transient session state (token + bootstrap flags) so the next
+ * authed RPC re-runs the bootstrap chain against whatever
+ * {@link getRuntimeSettings} now reports. Called by the Settings dialog
+ * after persisting changes.
+ *
+ * Does <strong>not</strong> talk to the network — a stale {@code sess-...}
+ * token may linger on the server until its sliding TTL expires. Use
+ * {@link logout} when you want a synchronous server-side invalidate.
+ */
 export function applyRuntimeSettings(): void {
   const config = getRuntimeSettings();
-  activeAuthUserName = config.userName;
+  sessionUserName = config.userName;
+  sessionToken = "";
+  sessionExpiresAtMs = null;
   authBootstrapDone = false;
   authBootstrapInFlight = null;
 }
@@ -763,7 +928,18 @@ export async function bootstrapCurrentSettings(): Promise<void> {
   await ensureAuthBootstrap();
 }
 
-export async function setPasswordForCurrentSettings(): Promise<void> {
+/**
+ * Calls {@code AuthService/Login} for the current settings without re-running
+ * the SetUserProperties / SetPrivateKey bootstrap RPCs. Use when the user has
+ * only changed their password (UserProperties + PrivateKey are already on the
+ * server) and wants to re-authenticate without re-uploading material.
+ *
+ * <p>Renamed from the previous {@code setPasswordForCurrentSettings} along
+ * with the underlying RPC swap (SetPasswordForUser → AuthService.Login). The
+ * external behaviour stays the same: throws on bad credentials, leaves the
+ * caller authenticated on success.
+ */
+export async function loginWithCurrentSettings(): Promise<void> {
   applyRuntimeSettings();
   const config = getRuntimeSettings();
   const userName = (config.userName || "").trim();
@@ -774,13 +950,39 @@ export async function setPasswordForCurrentSettings(): Promise<void> {
   if (!accountPassword) {
     throw new Error("Password is required.");
   }
-  await grpcUnary(
-    "altastata.v1.UsersService/SetPasswordForUser",
-    "SetPasswordForUserRequest",
-    { userName, accountPassword },
-    "SetPasswordForUserResponse",
-    false,
-  );
+  await performLogin(userName, accountPassword);
+  // A successful Login is, from auth's point of view, a successful bootstrap:
+  // subsequent withBootstrapRetry-wrapped RPCs should not redundantly re-run
+  // SetUserProperties / SetPrivateKey just because authBootstrapDone was
+  // false coming out of applyRuntimeSettings.
+  authBootstrapDone = true;
+}
+
+/**
+ * Server-side invalidation of the current session. Best-effort: any RPC error
+ * is logged and swallowed because the local state cleanup must always happen
+ * (we never want to leave a UI in a "logged-out by network failure but token
+ * still cached locally" state). After this call returns, the next authed
+ * call will trigger a fresh {@link ensureAuthBootstrap}.
+ */
+export async function logout(): Promise<void> {
+  if (sessionToken) {
+    try {
+      await grpcUnary(
+        "altastata.v1.AuthService/Logout",
+        "LogoutRequest",
+        {},
+        "LogoutResponse",
+        true,
+      );
+    } catch (error) {
+      console.warn("[altastata] Logout RPC failed; clearing local state anyway:", String(error));
+    }
+  }
+  sessionToken = "";
+  sessionExpiresAtMs = null;
+  authBootstrapDone = false;
+  authBootstrapInFlight = null;
 }
 
 export async function getAccount(): Promise<AccountInfo> {

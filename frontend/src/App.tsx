@@ -23,7 +23,7 @@ import {
   applyRuntimeSettings,
   bootstrapCurrentSettings,
   getAccount,
-  setPasswordForCurrentSettings,
+  loginWithCurrentSettings,
   subscribeToAltaStataEvents,
 } from "@/api/altastata";
 import { getRuntimeSettings, updateRuntimeSettings, type RuntimeSettings } from "@/config/runtimeSettings";
@@ -97,6 +97,32 @@ export default function App() {
     });
   }, []);
 
+  // Stable callback for MillerColumns. If we let JSX inline this, App's
+  // `<MillerColumns onSelectionContextChange={(...) => ...}>` would hand
+  // MillerColumns a fresh function reference on every render, which retriggers
+  // its selection-context effect, which calls back into us with a new `[]`
+  // array (or a freshly filtered one), which sets new state here, which
+  // re-renders App, which mints another fresh function reference, ad
+  // infinitum -- the classic "Maximum update depth exceeded" loop.
+  // We also short-circuit when the values are content-equal so React can bail
+  // out of the inevitable extra render after the columns settle.
+  const handleSelectionContextChange = useCallback(
+    (entries: FileEntry[], currentPath: string) => {
+      setSelectedEntries((prev) => {
+        if (prev.length === entries.length && prev.every((e, i) => e === entries[i])) {
+          return prev;
+        }
+        return entries;
+      });
+      setActivePath((prev) => (prev === currentPath ? prev : currentPath));
+    },
+    [],
+  );
+
+  const handleRefresh = useCallback(() => {
+    setReloadToken((prev) => prev + 1);
+  }, []);
+
   // Long-lived subscription to AltaStata events. The backend fires `SHARE`
   // when another user shares a file with us, and `DELETE` when our access is
   // revoked / a shared file is deleted. We use any event as a cue to reload
@@ -167,12 +193,12 @@ export default function App() {
     };
   }, [account]);
 
-  const openSettings = () => {
+  const openSettings = useCallback(() => {
     setSettingsDraft(getRuntimeSettings());
     setSettingsStatus(null);
     setSettingsError(null);
     setSettingsOpen(true);
-  };
+  }, []);
 
   const closeSettings = () => {
     if (settingsBusy) return;
@@ -227,12 +253,12 @@ export default function App() {
   const handleSetPasswordOnly = async () => {
     setSettingsBusy(true);
     setSettingsError(null);
-    setSettingsStatus("Saving settings and calling SetPasswordForUser...");
+    setSettingsStatus("Saving settings and signing in...");
     try {
       const saved = await persistAndRefresh();
       setSettingsDraft(saved);
-      await setPasswordForCurrentSettings();
-      setSettingsStatus("SetPasswordForUser succeeded.");
+      await loginWithCurrentSettings();
+      setSettingsStatus("Signed in.");
     } catch (e) {
       setSettingsError(e instanceof Error ? e.message : String(e));
       setSettingsStatus(null);
@@ -274,10 +300,7 @@ export default function App() {
           reloadToken={reloadToken}
           pendingFolderPaths={pendingFolderPaths}
           onRealFolderPaths={reconcilePendingFolders}
-          onSelectionContextChange={(entries, currentPath) => {
-            setSelectedEntries(entries);
-            setActivePath(currentPath);
-          }}
+          onSelectionContextChange={handleSelectionContextChange}
           onOpenSettings={openSettings}
         />
       </Box>
@@ -287,7 +310,7 @@ export default function App() {
         activePath={activePath}
         pendingFolderPaths={pendingFolderPaths}
         onAddPendingFolder={addPendingFolder}
-        onRefresh={() => setReloadToken((prev) => prev + 1)}
+        onRefresh={handleRefresh}
       />
 
       <Dialog
@@ -386,7 +409,7 @@ export default function App() {
           <Button onClick={closeSettings} disabled={settingsBusy}>Close</Button>
           <Button onClick={() => void handleSave()} disabled={settingsBusy} variant="outlined">Save</Button>
           <Button onClick={() => void handleSetPasswordOnly()} disabled={settingsBusy} variant="outlined">
-            Save & Set Password Only
+            Save & Sign In Only
           </Button>
           <Button onClick={() => void handleSaveAndRunBootstrap()} disabled={settingsBusy} variant="contained">
             Save & Run Bootstrap
