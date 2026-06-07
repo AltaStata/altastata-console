@@ -737,20 +737,37 @@ async function ensureAuthBootstrap(): Promise<void> {
     // eslint-disable-next-line no-console
     console.info("[altastata] bootstrap start", { user: bootstrapUser, fullBootstrap });
     if (fullBootstrap) {
-      await grpcUnary(
-        "altastata.v1.UsersService/SetUserProperties",
-        "SetUserPropertiesRequest",
-        { userName: bootstrapUser, userProperties: config.userProperties },
-        "SetUserPropertiesResponse",
-        false,
-      );
-      await grpcUnary(
-        "altastata.v1.UsersService/SetPrivateKey",
-        "SetPrivateKeyRequest",
-        { userName: bootstrapUser, privateKeyEncrypted: config.privateKey },
-        "SetPrivateKeyResponse",
-        false,
-      );
+      // Multi-client safety: another client (e.g. a Python kernel, or this
+      // browser tab itself reloading) may have already installed user
+      // properties / private key for this user. After the bootstrap RPCs
+      // were tightened (PR #186) the server now rejects re-install with
+      // ALREADY_EXISTS / "User is already bootstrapped". That's the
+      // happy path for us — we simply fall through to AuthService/Login
+      // with the password the user just typed. We deliberately scope the
+      // swallow to that exact (status, message) pair so genuine failures
+      // (wrong proto, transport, etc.) still surface.
+      try {
+        await grpcUnary(
+          "altastata.v1.UsersService/SetUserProperties",
+          "SetUserPropertiesRequest",
+          { userName: bootstrapUser, userProperties: config.userProperties },
+          "SetUserPropertiesResponse",
+          false,
+        );
+      } catch (error) {
+        if (!isAlreadyBootstrappedError(error)) throw error;
+      }
+      try {
+        await grpcUnary(
+          "altastata.v1.UsersService/SetPrivateKey",
+          "SetPrivateKeyRequest",
+          { userName: bootstrapUser, privateKeyEncrypted: config.privateKey },
+          "SetPrivateKeyResponse",
+          false,
+        );
+      } catch (error) {
+        if (!isAlreadyBootstrappedError(error)) throw error;
+      }
     }
     // Replaces the legacy SetPasswordForUser RPC. The gateway issues a fresh
     // sess-<random> token via SessionRegistry; the previous local-<userName>
@@ -821,6 +838,24 @@ function isInvalidCredentialsError(error: unknown): boolean {
   if (error instanceof InvalidPasswordError) return true;
   const message = error instanceof Error ? error.message : String(error);
   return /\bstatus=16\b.*invalid credentials/i.test(message);
+}
+
+/**
+ * Recognises the post-#186 server response to a re-bootstrap attempt
+ * ({@code SetUserProperties} or {@code SetPrivateKey}) when the user is
+ * already bootstrapped — gRPC {@code ALREADY_EXISTS} (status=6) with the
+ * fixed description {@code "User is already bootstrapped; use AuthService.Login"}.
+ *
+ * In a multi-client setup this is the normal path: one client (Python kernel,
+ * another browser tab, …) bootstrapped the user first, and the second client
+ * just needs to call {@code AuthService/Login} with its own password. We
+ * therefore swallow exactly this status+message combination from the bootstrap
+ * RPCs and let the flow continue. The matcher is intentionally narrow so any
+ * other {@code ALREADY_EXISTS} the server might add later still surfaces.
+ */
+function isAlreadyBootstrappedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\bstatus=6\b.*already bootstrapped/i.test(message);
 }
 
 /**
