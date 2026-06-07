@@ -689,6 +689,49 @@ async function grpcServerStream(
  * for a wrong password, {@code FAILED_PRECONDITION} when SetUserProperties /
  * SetPrivateKey have not been called yet for this user).
  */
+/**
+ * Build the {@code clientHint} sent on every {@code AuthService/Login} call.
+ *
+ * <p>The backend enforces a single-session-per-{@code (userName, clientHint)}
+ * invariant: a fresh Login from the same hint evicts the prior session and
+ * closes its {@code EventsService/Watch} stream. To stop two browser tabs of
+ * the same user from killing each other on every Login, we tag the hint with
+ * a per-tab UUID stored in {@code sessionStorage} — survives a reload (so the
+ * reloaded tab evicts its own zombie Watch from the pre-reload session) but
+ * is unique to each tab (so independent tabs run side-by-side). Falls back
+ * to a process-wide UUID when {@code sessionStorage} is unavailable (older
+ * browsers, file:// origins) so the hint still differs across page loads.
+ */
+let memoizedClientHint: string | null = null;
+function getClientHint(): string {
+  if (memoizedClientHint) return memoizedClientHint;
+  const PREFIX = "altastata-console-web";
+  const STORAGE_KEY = "altastata.tabId";
+  let tabId: string | null = null;
+  try {
+    tabId = window.sessionStorage.getItem(STORAGE_KEY);
+    if (!tabId) {
+      tabId = generateUuid();
+      window.sessionStorage.setItem(STORAGE_KEY, tabId);
+    }
+  } catch {
+    // sessionStorage may be denied by browser policy; fall back to a one-shot
+    // module-scoped UUID. Reload then yields a fresh hint, which is fine —
+    // it just disables the "evict my own pre-reload zombie" optimisation.
+    tabId = generateUuid();
+  }
+  memoizedClientHint = `${PREFIX}/${tabId}`;
+  return memoizedClientHint;
+}
+
+function generateUuid(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  // Last-resort RFC4122-ish fallback for environments without crypto.randomUUID.
+  const rand = () => Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, "0");
+  return `${rand()}-${rand()}-${rand()}-${rand()}`;
+}
+
 async function performLogin(userName: string, accountPassword: string): Promise<void> {
   let resp: Record<string, unknown>;
   try {
@@ -698,7 +741,7 @@ async function performLogin(userName: string, accountPassword: string): Promise<
       {
         userName,
         accountPassword,
-        clientHint: "altastata-console-web",
+        clientHint: getClientHint(),
       },
       "LoginResponse",
       false,
