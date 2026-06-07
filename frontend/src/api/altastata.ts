@@ -113,11 +113,6 @@ message DownloadDirectoryAsZipRequest {
   string cloud_path_prefix = 1;
 }
 message DownloadDirectoryAsZipChunk { bytes data = 1; }
-message SubscribeRequest {}
-message EventMessage {
-  string event_name = 1;
-  string data = 2;
-}
 message WatchRequest {
   uint64 since_sequence = 1;
 }
@@ -1436,8 +1431,9 @@ export interface AltaStataEvent {
  * inevitable Watch-stream reconnects (TCP/HTTP-2 idle close, app sleep,
  * server restart) so we can ask the backend to replay anything we missed
  * via {@code WatchRequest.since_sequence}, instead of silently losing
- * SHARE/DELETE events that fired during the reconnect gap (the legacy
- * {@code EventsService/Subscribe} path was at-most-once and dropped them).
+ * SHARE/DELETE events that fired during the reconnect gap (the pre-Watch
+ * untyped path was at-most-once and dropped them; that RPC has since been
+ * removed from the gateway).
  *
  * <p>Reset to {@code 0} from {@link applyRuntimeSettings}: a settings
  * change implies a different user, and resuming from another user's

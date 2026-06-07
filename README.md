@@ -81,13 +81,16 @@ which dist the browser is serving — handy when chasing cache-busting issues.
 ### Live updates (events)
 
 While the UI is open it keeps a long-running gRPC server-streaming call to
-`altastata.v1.EventsService/Subscribe`. The Java backend forwards
-`SecureCloudEventProcessor` notifications (`SHARE` when another user shares
-a file with the current user, `DELETE` when access is revoked or a shared
-file is deleted) and the UI auto-refreshes the current view so the file list
-never goes stale. The stream auto-reconnects on transient failures, and a
-follow-up refresh is scheduled ~7s after every event to absorb the gap
-between the event dispatch and the backend's "Finishing shot" finalisation.
+`altastata.v1.EventsService/Watch`. The Java backend forwards
+`SecureCloudEventProcessor` notifications as typed `Event` payloads
+(`FileSharedEvent` when another user shares a file with the current user,
+`FileUnsharedEvent` when access is revoked or a shared file is deleted) and
+the UI auto-refreshes the current view so the file list never goes stale.
+The stream auto-reconnects on transient failures with the last seen
+`since_sequence` to replay any missed events from the per-user ring buffer,
+and a follow-up refresh is scheduled ~7s after every event to absorb the
+gap between the event dispatch and the backend's "Finishing shot"
+finalisation.
 
 ### UI log panel
 
