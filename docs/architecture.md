@@ -60,7 +60,7 @@ The frontend currently mirrors JavaFX behavior:
 | CSV preview | treated as text (`text/csv`) |
 | Preview metadata | `GetAttributes` (`size`, `readers`) + version tag parsing |
 | User derivation | `myuser` from user properties (JavaFX-compatible) |
-| Live updates on `SHARE` / `DELETE` | `EventsService.Subscribe` server stream + ~7s follow-up `listDir` to absorb backend's "Finishing shot" lag |
+| Live updates on `SHARE` / `DELETE` | `EventsService.Watch` server stream (typed `Event` payloads, `since_sequence` replay) + ~7s follow-up `listDir` to absorb backend's "Finishing shot" lag |
 | Self-healing auth | `withBootstrapRetry` — on `status=16`/`status=9`/"User is not initialized" the client transparently re-runs the bootstrap sequence and retries the call once |
 
 ## Runtime settings and secrets
