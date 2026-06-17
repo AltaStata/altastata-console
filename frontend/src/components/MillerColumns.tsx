@@ -407,7 +407,7 @@ export default function MillerColumns({
           </Typography>
           <Typography variant="body2" color="text.secondary">
             {needsPassword
-              ? "Open Settings, fill in (or verify) your password, then click Save & Run Bootstrap."
+              ? "Open Settings, choose your account folder, enter your password, then click Sign in."
               : rootError.message}
           </Typography>
           {onOpenSettings && (

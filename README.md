@@ -107,16 +107,14 @@ VITE_ALTASTATA_GRPC_BASE_URL=http://127.0.0.1:9877
 VITE_ALTASTATA_ACCOUNT_ID=amazon.rsa.<user>
 VITE_ALTASTATA_GRPC_USER_NAME=<user>
 # Password is entered manually in Settings each session.
-# Optional defaults only; do not commit real values:
-# VITE_ALTASTATA_USER_PROPERTIES=<multiline properties string with \n>
-# VITE_ALTASTATA_PRIVATE_KEY=<encrypted private key with \n>
+# Sign in: choose account folder (*user.properties + private keys) → LoginV2 upload.
 VITE_ALTASTATA_AUTO_BOOTSTRAP=true
-VITE_ALTASTATA_BOOTSTRAP_MODE=auto
 ```
 
 ## Secrets policy
 
-- Never commit real `userProperties`, `privateKey`, or `password`.
+- Never commit real account key files or `password`.
+- Account material (`*user.properties`, private keys) is held in memory only — not localStorage.
 - `password` is not persisted to browser localStorage by the app.
 - Keep sensitive values in local runtime settings and/or local `.env.local`.
 - `.env.local` is gitignored in this repo, but always verify with `git status` before committing.

@@ -1,6 +1,13 @@
 import protobufjs, { type Type } from "protobufjs/dist/protobuf";
 import type { AccountInfo, FileEntry, ListResponse, VersionEntry } from "@/types";
-import { extractMyUserFromProperties, getRuntimeSettings } from "@/config/runtimeSettings";
+import { parseAccountFolder } from "@/api/accountFolder";
+import type { LoginV2UploadMaterial } from "@/api/accountFolder";
+import { getRuntimeSettings, updateRuntimeSettings } from "@/config/runtimeSettings";
+import {
+  getSessionAccountMaterial,
+  hasSessionAccountMaterial,
+  setSessionAccountMaterial,
+} from "@/session/accountMaterial";
 
 type Bytes = Uint8Array;
 
@@ -41,6 +48,19 @@ message LoginResponse {
   string    session_token = 1;
   Timestamp expires_at    = 2;
   string    access_key    = 3;
+}
+message LoginV2Upload {
+  string user_properties = 1;
+  map<string, bytes> account_files = 2;
+}
+message LoginV2Request {
+  string client_hint = 1;
+  string password = 2;
+  LoginV2Upload upload = 3;
+}
+message LoginV2Response {
+  string session_token = 1;
+  Timestamp expires_at = 2;
 }
 message LogoutRequest {}
 message LogoutResponse {}
@@ -440,7 +460,6 @@ let authBootstrapInFlight: Promise<void> | null = null;
  * {@code accountPassword} (which has always been in-memory only).
  */
 let sessionToken = "";
-let sessionUserName = getRuntimeSettings().userName;
 let sessionExpiresAtMs: number | null = null;
 
 async function grpcUnary(
@@ -732,36 +751,41 @@ function generateUuid(): string {
   return `${rand()}-${rand()}-${rand()}-${rand()}`;
 }
 
-async function performLogin(userName: string, accountPassword: string): Promise<void> {
+async function performLoginV2(
+  password: string,
+  material: LoginV2UploadMaterial,
+): Promise<void> {
   let resp: Record<string, unknown>;
   try {
     resp = await grpcUnary(
-      "altastata.v1.AuthService/Login",
-      "LoginRequest",
+      "altastata.v1.AuthService/LoginV2",
+      "LoginV2Request",
       {
-        userName,
-        accountPassword,
         clientHint: getClientHint(),
+        password,
+        upload: {
+          userProperties: material.userProperties,
+          accountFiles: material.accountFiles,
+        },
       },
-      "LoginResponse",
+      "LoginV2Response",
       false,
     );
   } catch (error) {
-    // Translate the transport-level "gRPC status=16 message=Invalid
-    // credentials" into a user-facing "Invalid password" while still
-    // letting withBootstrapRetry / isInvalidCredentialsError detect it via
-    // the InvalidPasswordError class.
     if (isInvalidCredentialsError(error)) throw new InvalidPasswordError();
     throw error;
   }
   const newToken = typeof resp.sessionToken === "string" ? resp.sessionToken : "";
   if (!newToken) {
-    throw new Error("Login response missing session_token");
+    throw new Error("LoginV2 response missing session_token");
   }
   sessionToken = newToken;
-  sessionUserName = userName;
   const expiresAt = resp.expiresAt as { seconds?: number } | undefined;
   sessionExpiresAtMs = typeof expiresAt?.seconds === "number" ? expiresAt.seconds * 1000 : null;
+  updateRuntimeSettings({
+    userName: material.myUser,
+    accountId: material.displayName || material.myUser,
+  });
 }
 
 async function ensureAuthBootstrap(): Promise<void> {
@@ -772,53 +796,21 @@ async function ensureAuthBootstrap(): Promise<void> {
   }
   authBootstrapInFlight = (async () => {
     const config = getRuntimeSettings();
-    const bootstrapUser = (sessionUserName || config.userName).trim();
-    if (!bootstrapUser) throw new Error("No auth user configured");
-    const hasFullBootstrapMaterial = Boolean(config.userProperties && config.privateKey);
-    const fullBootstrap = (config.bootstrapMode === "full")
-      || (config.bootstrapMode === "auto" && hasFullBootstrapMaterial);
-    // eslint-disable-next-line no-console
-    console.info("[altastata] bootstrap start", { user: bootstrapUser, fullBootstrap });
-    if (fullBootstrap) {
-      // Multi-client safety: another client (e.g. a Python kernel, or this
-      // browser tab itself reloading) may have already installed user
-      // properties / private key for this user. After the bootstrap RPCs
-      // were tightened (PR #186) the server now rejects re-install with
-      // ALREADY_EXISTS / "User is already bootstrapped". That's the
-      // happy path for us — we simply fall through to AuthService/Login
-      // with the password the user just typed. We deliberately scope the
-      // swallow to that exact (status, message) pair so genuine failures
-      // (wrong proto, transport, etc.) still surface.
-      try {
-        await grpcUnary(
-          "altastata.v1.UsersService/SetUserProperties",
-          "SetUserPropertiesRequest",
-          { userName: bootstrapUser, userProperties: config.userProperties },
-          "SetUserPropertiesResponse",
-          false,
-        );
-      } catch (error) {
-        if (!isAlreadyBootstrappedError(error)) throw error;
-      }
-      try {
-        await grpcUnary(
-          "altastata.v1.UsersService/SetPrivateKey",
-          "SetPrivateKeyRequest",
-          { userName: bootstrapUser, privateKeyEncrypted: config.privateKey },
-          "SetPrivateKeyResponse",
-          false,
-        );
-      } catch (error) {
-        if (!isAlreadyBootstrappedError(error)) throw error;
-      }
+    const material = getSessionAccountMaterial();
+    if (!material) {
+      throw new Error("Choose an account folder in Settings before signing in.");
     }
-    // Replaces the legacy SetPasswordForUser RPC. The gateway issues a fresh
-    // sess-<random> token via SessionRegistry; the previous local-<userName>
-    // formula is gone (see SESSION_AND_EVENTS_DESIGN.md §5).
-    await performLogin(bootstrapUser, config.accountPassword);
+    const password = config.accountPassword ?? "";
+    if (!password) {
+      throw new Error("Password is required.");
+    }
+    const bootstrapUser = material.myUser;
+    // eslint-disable-next-line no-console
+    console.info("[altastata] LoginV2 start", { user: bootstrapUser });
+    await performLoginV2(password, material);
     authBootstrapDone = true;
     // eslint-disable-next-line no-console
-    console.info("[altastata] bootstrap done", {
+    console.info("[altastata] LoginV2 done", {
       user: bootstrapUser,
       hasSessionToken: Boolean(sessionToken),
       expiresAtMs: sessionExpiresAtMs,
@@ -828,7 +820,7 @@ async function ensureAuthBootstrap(): Promise<void> {
     await authBootstrapInFlight;
   } catch (error) {
     // eslint-disable-next-line no-console
-    console.error("[altastata] bootstrap failed", String(error));
+    console.error("[altastata] LoginV2 failed", String(error));
     throw error;
   } finally {
     authBootstrapInFlight = null;
@@ -842,7 +834,7 @@ async function maybeBootstrap(): Promise<void> {
 
 function canBootstrapFromEnv(): boolean {
   const config = getRuntimeSettings();
-  return Boolean((sessionUserName || config.userName) && config.accountPassword);
+  return Boolean(hasSessionAccountMaterial() && config.accountPassword);
 }
 
 function isPasswordBootstrapError(message: string): boolean {
@@ -867,14 +859,14 @@ export class InvalidPasswordError extends Error {
 
 /**
  * Recognises the gateway's response to a wrong password on
- * {@code AuthService/Login}: {@code UNAUTHENTICATED} (status=16) with the
+ * {@code AuthService/Login} or {@code AuthService/LoginV2}: {@code UNAUTHENTICATED} (status=16) with the
  * fixed description {@code "Invalid credentials"}. We detect this so
  * {@link withBootstrapRetry} can skip its retry loop in this case — running
  * Login twice with the same wrong password is just noise (and an extra
  * audit-log line on the server) when we know it cannot succeed.
  *
  * Accepts both the typed {@link InvalidPasswordError} thrown by
- * {@link performLogin} and the raw {@code Error} from {@link grpcUnary}, so
+ * {@link performLoginV2} and the raw {@code Error} from {@link grpcUnary}, so
  * callers don't have to know which layer the error came from.
  */
 function isInvalidCredentialsError(error: unknown): boolean {
@@ -884,30 +876,12 @@ function isInvalidCredentialsError(error: unknown): boolean {
 }
 
 /**
- * Recognises the post-#186 server response to a re-bootstrap attempt
- * ({@code SetUserProperties} or {@code SetPrivateKey}) when the user is
- * already bootstrapped — gRPC {@code ALREADY_EXISTS} (status=6) with the
- * fixed description {@code "User is already bootstrapped; use AuthService.Login"}.
- *
- * In a multi-client setup this is the normal path: one client (Python kernel,
- * another browser tab, …) bootstrapped the user first, and the second client
- * just needs to call {@code AuthService/Login} with its own password. We
- * therefore swallow exactly this status+message combination from the bootstrap
- * RPCs and let the flow continue. The matcher is intentionally narrow so any
- * other {@code ALREADY_EXISTS} the server might add later still surfaces.
- */
-function isAlreadyBootstrappedError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /\bstatus=6\b.*already bootstrapped/i.test(message);
-}
-
-/**
  * Returns true when a gRPC error indicates the user has not finished setting
  * up authentication for this AltaStata account in the current session — most
  * commonly because the password is missing in Settings, the supplied password
  * is wrong, or a stale token has been rejected by the gateway. In all of
  * these cases the remediation is the same (open Settings → fill / verify
- * password → Save & Run Bootstrap), so the UI uses this single signal to
+ * password → Sign in), so the UI uses this single signal to
  * decide whether to show the "set your password" empty state instead of a
  * generic error.
  *
@@ -947,11 +921,8 @@ export function isUserNotInitializedError(error: unknown): boolean {
  *     gateway raises when state is partial.
  *
  * The retry strategy is deliberately simple: if the current Settings provide
- * enough material to bootstrap, force a fresh ensureAuthBootstrap() (which
- * re-runs SetUserProperties + SetPrivateKey + AuthService/Login for the
- * configured user) and retry the call once. We do not silently switch to an
- * "alternate" user name — that previous heuristic ended up registering
- * bob123_rsa and friends with half-initialised state and confused everyone.
+ * enough material to sign in (account folder loaded in memory + password),
+ * force a fresh ensureAuthBootstrap() (LoginV2 upload) and retry the call once.
  *
  * <p>One narrow exception: a wrong password from AuthService/Login surfaces as
  * {@code status=16 / "Invalid credentials"}; retrying that is pointless and
@@ -1005,11 +976,26 @@ function authHint(error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
   if (/status=16|invalid token/i.test(message)) {
     return new Error(
-      `${message}. Open Settings and provide user properties/private key/password, then run bootstrap.`,
+      `${message}. Open Settings, choose your account folder, enter your password, then Sign in.`,
     );
   }
   return new Error(message);
 }
+
+/**
+ * Load account material from a {@code webkitdirectory} picker into session
+ * memory (not persisted). Call before {@link bootstrapCurrentSettings}.
+ */
+export async function loadAccountFolderFromPicker(files: FileList): Promise<void> {
+  const material = await parseAccountFolder(files);
+  setSessionAccountMaterial(material);
+  updateRuntimeSettings({
+    userName: material.myUser,
+    accountId: material.displayName || material.myUser,
+  });
+}
+
+export { hasSessionAccountMaterial, getSessionAccountMaterial };
 
 /**
  * Resets transient session state (token + bootstrap flags) so the next
@@ -1022,8 +1008,6 @@ function authHint(error: unknown): Error {
  * {@link logout} when you want a synchronous server-side invalidate.
  */
 export function applyRuntimeSettings(): void {
-  const config = getRuntimeSettings();
-  sessionUserName = config.userName;
   sessionToken = "";
   sessionExpiresAtMs = null;
   authBootstrapDone = false;
@@ -1037,32 +1021,20 @@ export async function bootstrapCurrentSettings(): Promise<void> {
 }
 
 /**
- * Calls {@code AuthService/Login} for the current settings without re-running
- * the SetUserProperties / SetPrivateKey bootstrap RPCs. Use when the user has
- * only changed their password (UserProperties + PrivateKey are already on the
- * server) and wants to re-authenticate without re-uploading material.
- *
- * <p>Renamed from the previous {@code setPasswordForCurrentSettings} along
- * with the underlying RPC swap (SetPasswordForUser → AuthService.Login). The
- * external behaviour stays the same: throws on bad credentials, leaves the
- * caller authenticated on success.
+ * Calls {@code AuthService/LoginV2} with in-memory account folder material
+ * and the current password (no re-upload of the folder).
  */
 export async function loginWithCurrentSettings(): Promise<void> {
   applyRuntimeSettings();
-  const config = getRuntimeSettings();
-  const userName = (config.userName || "").trim();
-  const accountPassword = config.accountPassword ?? "";
-  if (!userName) {
-    throw new Error("User name is required.");
+  const material = getSessionAccountMaterial();
+  if (!material) {
+    throw new Error("Choose an account folder first, or use Sign in.");
   }
+  const accountPassword = getRuntimeSettings().accountPassword ?? "";
   if (!accountPassword) {
     throw new Error("Password is required.");
   }
-  await performLogin(userName, accountPassword);
-  // A successful Login is, from auth's point of view, a successful bootstrap:
-  // subsequent withBootstrapRetry-wrapped RPCs should not redundantly re-run
-  // SetUserProperties / SetPrivateKey just because authBootstrapDone was
-  // false coming out of applyRuntimeSettings.
+  await performLoginV2(accountPassword, material);
   authBootstrapDone = true;
 }
 
@@ -1095,9 +1067,11 @@ export async function logout(): Promise<void> {
 
 export async function getAccount(): Promise<AccountInfo> {
   const config = getRuntimeSettings();
+  const material = getSessionAccountMaterial();
   return {
     account_id: config.accountId,
-    display_name: extractMyUserFromProperties(config.userProperties)
+    display_name: material?.myUser
+      || config.userName
       || config.accountId.split(".").at(-1)
       || "unknown",
   };

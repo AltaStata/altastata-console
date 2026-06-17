@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   AppBar,
@@ -23,9 +23,12 @@ import {
   applyRuntimeSettings,
   bootstrapCurrentSettings,
   getAccount,
+  hasSessionAccountMaterial,
+  loadAccountFolderFromPicker,
   loginWithCurrentSettings,
   subscribeToAltaStataEvents,
 } from "@/api/altastata";
+import { getSessionAccountMaterial } from "@/session/accountMaterial";
 import { getRuntimeSettings, updateRuntimeSettings, type RuntimeSettings } from "@/config/runtimeSettings";
 import type { AccountInfo, FileEntry } from "@/types";
 import MillerColumns from "@/components/MillerColumns";
@@ -48,6 +51,8 @@ export default function App() {
   const [settingsStatus, setSettingsStatus] = useState<string | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settingsBusy, setSettingsBusy] = useState(false);
+  const [accountFolderLabel, setAccountFolderLabel] = useState<string | null>(null);
+  const accountFolderInputRef = useRef<HTMLInputElement | null>(null);
   const [logOpen, setLogOpen] = useState(false);
   // Client-only "pending" folders. AltaStata stores files keyed by `/`-separated
   // prefixes, so a folder is just the implicit parent of one or more files.
@@ -195,6 +200,10 @@ export default function App() {
 
   const openSettings = useCallback(() => {
     setSettingsDraft(getRuntimeSettings());
+    const material = getSessionAccountMaterial();
+    setAccountFolderLabel(material
+      ? `${material.displayName} (${material.myUser})`
+      : null);
     setSettingsStatus(null);
     setSettingsError(null);
     setSettingsOpen(true);
@@ -233,15 +242,18 @@ export default function App() {
     }
   };
 
-  const handleSaveAndRunBootstrap = async () => {
+  const handleSaveAndSignIn = async () => {
     setSettingsBusy(true);
     setSettingsError(null);
-    setSettingsStatus("Saving settings and running bootstrap...");
+    setSettingsStatus("Signing in...");
     try {
       const saved = await persistAndRefresh();
       setSettingsDraft(saved);
+      if (!hasSessionAccountMaterial()) {
+        throw new Error("Choose an account folder before signing in.");
+      }
       await bootstrapCurrentSettings();
-      setSettingsStatus("Bootstrap succeeded.");
+      setSettingsStatus("Signed in.");
     } catch (e) {
       setSettingsError(e instanceof Error ? e.message : String(e));
       setSettingsStatus(null);
@@ -250,10 +262,10 @@ export default function App() {
     }
   };
 
-  const handleSetPasswordOnly = async () => {
+  const handleReSignIn = async () => {
     setSettingsBusy(true);
     setSettingsError(null);
-    setSettingsStatus("Saving settings and signing in...");
+    setSettingsStatus("Re-signing in...");
     try {
       const saved = await persistAndRefresh();
       setSettingsDraft(saved);
@@ -262,6 +274,29 @@ export default function App() {
     } catch (e) {
       setSettingsError(e instanceof Error ? e.message : String(e));
       setSettingsStatus(null);
+    } finally {
+      setSettingsBusy(false);
+    }
+  };
+
+  const handleAccountFolderSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = event.target.files;
+    event.target.value = "";
+    if (!fileList || fileList.length === 0) return;
+    setSettingsBusy(true);
+    setSettingsError(null);
+    setSettingsStatus("Loading account folder...");
+    try {
+      await loadAccountFolderFromPicker(fileList);
+      const material = getSessionAccountMaterial();
+      setAccountFolderLabel(material
+        ? `${material.displayName} (${material.myUser})`
+        : null);
+      setSettingsStatus("Account folder loaded. Enter password and click Sign in.");
+    } catch (e) {
+      setSettingsError(e instanceof Error ? e.message : String(e));
+      setSettingsStatus(null);
+      setAccountFolderLabel(null);
     } finally {
       setSettingsBusy(false);
     }
@@ -340,20 +375,13 @@ export default function App() {
               size="small"
             />
             <TextField
-              label="Account ID"
+              label="Account ID (display)"
               value={settingsDraft.accountId}
               onChange={(e) => setField("accountId", e.target.value)}
               disabled={settingsBusy}
               fullWidth
               size="small"
-            />
-            <TextField
-              label="User name"
-              value={settingsDraft.userName}
-              onChange={(e) => setField("userName", e.target.value)}
-              disabled={settingsBusy}
-              fullWidth
-              size="small"
+              helperText="Updated when you choose an account folder."
             />
             <TextField
               label="Password"
@@ -364,26 +392,31 @@ export default function App() {
               fullWidth
               size="small"
             />
-            <TextField
-              label="User properties"
-              value={settingsDraft.userProperties}
-              onChange={(e) => setField("userProperties", e.target.value)}
-              disabled={settingsBusy}
-              fullWidth
-              multiline
-              minRows={6}
-              maxRows={12}
+            <input
+              ref={(node) => {
+                accountFolderInputRef.current = node;
+                if (node) {
+                  node.setAttribute("webkitdirectory", "");
+                  node.setAttribute("directory", "");
+                }
+              }}
+              type="file"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => void handleAccountFolderSelected(e)}
             />
-            <TextField
-              label="Private key"
-              value={settingsDraft.privateKey}
-              onChange={(e) => setField("privateKey", e.target.value)}
-              disabled={settingsBusy}
-              fullWidth
-              multiline
-              minRows={6}
-              maxRows={12}
-            />
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Button
+                variant="outlined"
+                disabled={settingsBusy}
+                onClick={() => accountFolderInputRef.current?.click()}
+              >
+                Choose account folder
+              </Button>
+              <Typography variant="body2" color="text.secondary">
+                {accountFolderLabel ?? "No folder selected (pick *user.properties + private keys)"}
+              </Typography>
+            </Stack>
             <FormControlLabel
               control={(
                 <Switch
@@ -392,27 +425,22 @@ export default function App() {
                   disabled={settingsBusy}
                 />
               )}
-              label="Auto bootstrap"
-            />
-            <TextField
-              label="Bootstrap mode"
-              value={settingsDraft.bootstrapMode}
-              onChange={(e) => setField("bootstrapMode", e.target.value)}
-              disabled={settingsBusy}
-              fullWidth
-              size="small"
-              helperText="Use auto or full."
+              label="Auto sign-in on first file operation"
             />
           </Stack>
         </DialogContent>
         <DialogActions>
           <Button onClick={closeSettings} disabled={settingsBusy}>Close</Button>
           <Button onClick={() => void handleSave()} disabled={settingsBusy} variant="outlined">Save</Button>
-          <Button onClick={() => void handleSetPasswordOnly()} disabled={settingsBusy} variant="outlined">
-            Save & Sign In Only
+          <Button
+            onClick={() => void handleReSignIn()}
+            disabled={settingsBusy || !hasSessionAccountMaterial()}
+            variant="outlined"
+          >
+            Re-sign in
           </Button>
-          <Button onClick={() => void handleSaveAndRunBootstrap()} disabled={settingsBusy} variant="contained">
-            Save & Run Bootstrap
+          <Button onClick={() => void handleSaveAndSignIn()} disabled={settingsBusy} variant="contained">
+            Sign in
           </Button>
         </DialogActions>
       </Dialog>
