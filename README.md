@@ -100,6 +100,19 @@ showing recent `console.*` output captured by an in-app ring buffer
 auth issues without forcing the user to open browser DevTools, and shows
 the same lines that appear in the real console.
 
+### Create account (GenerateKeys)
+
+The **person+** icon in the top bar opens **Create account**:
+
+1. Pick account type (RSA, PQC, or HPCS (RSA)). HPCS keygen is deferred — use RSA/PQC to test Create Account until gateway HPCS keygen is wired (see `CONSOLE_ACCOUNT_SETUP_DESIGN.md` step 13).
+2. Optional folder name (e.g. `rsa.myuser`) and password (RSA/PQC only).
+3. **Generate keys** → **Download zip** (`<folder>.altastata.zip`).
+4. Unpack under `~/.altastata/accounts/`, send `public.key` to your org admin, save
+   the returned `*user.properties` into the same folder, then **Settings → Sign in**.
+
+Requires a gateway with `AccountSetupService.GenerateKeys` (local dev:
+`altastata-services` on port **9880**, not the older Docker image on 9877).
+
 You can still prefill defaults via `frontend/.env.local` (safe placeholders only):
 
 ```bash

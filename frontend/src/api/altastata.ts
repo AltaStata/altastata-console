@@ -167,6 +167,25 @@ message Event {
     EventGapEvent       event_gap       = 100;
   }
 }
+enum AccountType {
+  ACCOUNT_TYPE_UNSPECIFIED = 0;
+  RSA = 1;
+  PQC = 2;
+  HPCS = 3;
+}
+message GetSupportedAccountTypesRequest {}
+message GetSupportedAccountTypesResponse {
+  repeated AccountType account_types = 1;
+}
+message GenerateKeysRequest {
+  AccountType account_type = 1;
+  string password = 2;
+  string suggested_display_name = 3;
+}
+message GenerateKeysResponse {
+  map<string, bytes> account_files = 1;
+  string suggested_display_name = 2;
+}
 `;
 
 const root = protobufjs.parse(PROTO_DEF).root;
@@ -986,7 +1005,7 @@ function authHint(error: unknown): Error {
  * Load account material from a {@code webkitdirectory} picker into session
  * memory (not persisted). Call before {@link bootstrapCurrentSettings}.
  */
-export async function loadAccountFolderFromPicker(files: FileList): Promise<void> {
+export async function loadAccountFolderFromPicker(files: FileList | readonly File[]): Promise<void> {
   const material = await parseAccountFolder(files);
   setSessionAccountMaterial(material);
   updateRuntimeSettings({
@@ -1707,4 +1726,106 @@ export function suggestMultiZipName(entries: ReadonlyArray<{ path: string }>): s
     if (last) return `${last}.zip`;
   }
   return `altastata-download-${entries.length}-items.zip`;
+}
+
+/** All account keygen types (always shown in Create account UI). */
+export const ALL_ACCOUNT_KEY_TYPES: AccountKeyType[] = ["RSA", "PQC", "HPCS"];
+
+/** Account keygen types for {@link generateAccountKeys}. */
+export type AccountKeyType = "RSA" | "PQC" | "HPCS";
+
+const ACCOUNT_TYPE_FROM_PROTO: Record<number, AccountKeyType> = {
+  1: "RSA",
+  2: "PQC",
+  3: "HPCS",
+};
+
+const ACCOUNT_TYPE_TO_PROTO: Record<AccountKeyType, number> = {
+  RSA: 1,
+  PQC: 2,
+  HPCS: 3,
+};
+
+export interface GenerateKeysResult {
+  displayName: string;
+  accountFiles: Record<string, Uint8Array>;
+}
+
+const GENERATE_KEYS_TIMEOUT_MS = 120_000;
+
+function normalizeAccountFiles(raw: unknown): Record<string, Uint8Array> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: Record<string, Uint8Array> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (value instanceof Uint8Array) {
+      out[key] = value;
+    } else if (ArrayBuffer.isView(value)) {
+      out[key] = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    }
+  }
+  return out;
+}
+
+/**
+ * Lists account types for Create account (always RSA, PQC, HPCS). HPCS keygen
+ * is deferred — see CONSOLE_ACCOUNT_SETUP_DESIGN.md migration step 13.
+ */
+export async function getSupportedAccountTypes(): Promise<AccountKeyType[]> {
+  try {
+    const resp = await grpcUnary(
+      "altastata.v1.AccountSetupService/GetSupportedAccountTypes",
+      "GetSupportedAccountTypesRequest",
+      {},
+      "GetSupportedAccountTypesResponse",
+      false,
+    );
+    const rawTypes = resp.accountTypes;
+    if (!Array.isArray(rawTypes)) return [...ALL_ACCOUNT_KEY_TYPES];
+    const types: AccountKeyType[] = [];
+    for (const value of rawTypes) {
+      const mapped = typeof value === "number" ? ACCOUNT_TYPE_FROM_PROTO[value] : undefined;
+      if (mapped) types.push(mapped);
+    }
+    for (const fallback of ALL_ACCOUNT_KEY_TYPES) {
+      if (!types.includes(fallback)) types.push(fallback);
+    }
+    return types;
+  } catch {
+    return [...ALL_ACCOUNT_KEY_TYPES];
+  }
+}
+
+/**
+ * Runs {@code AccountSetupService.GenerateKeys} and returns key files for zip
+ * download (no {@code *user.properties} — admin step comes later).
+ */
+export async function generateAccountKeys(input: {
+  accountType: AccountKeyType;
+  password: string;
+  suggestedDisplayName?: string;
+}): Promise<GenerateKeysResult> {
+  const resp = await grpcUnary(
+    "altastata.v1.AccountSetupService/GenerateKeys",
+    "GenerateKeysRequest",
+    {
+      accountType: ACCOUNT_TYPE_TO_PROTO[input.accountType],
+      password: input.password,
+      suggestedDisplayName: input.suggestedDisplayName?.trim() || "",
+    },
+    "GenerateKeysResponse",
+    false,
+    GENERATE_KEYS_TIMEOUT_MS,
+  );
+  const accountFiles = normalizeAccountFiles(resp.accountFiles);
+  if (Object.keys(accountFiles).length === 0) {
+    throw new Error("GenerateKeys returned no account files.");
+  }
+  const displayName = typeof resp.suggestedDisplayName === "string" && resp.suggestedDisplayName
+    ? resp.suggestedDisplayName
+    : input.suggestedDisplayName?.trim() || "altastata-account";
+  return { displayName, accountFiles };
+}
+
+export function accountTypeRequiresPassword(type: AccountKeyType): boolean {
+  return type === "RSA" || type === "PQC";
 }

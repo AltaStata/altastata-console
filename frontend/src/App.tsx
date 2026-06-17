@@ -18,6 +18,7 @@ import {
   Typography,
 } from "@mui/material";
 import SettingsIcon from "@mui/icons-material/Settings";
+import PersonAddIcon from "@mui/icons-material/PersonAdd";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import {
   applyRuntimeSettings,
@@ -34,6 +35,7 @@ import type { AccountInfo, FileEntry } from "@/types";
 import MillerColumns from "@/components/MillerColumns";
 import BottomToolbar from "@/components/BottomToolbar";
 import LogDialog from "@/components/LogDialog";
+import CreateAccountDialog from "@/components/CreateAccountDialog";
 import { installLogBuffer } from "@/utils/logBuffer";
 
 // Install once at module load so we capture every console.* call from then on,
@@ -54,6 +56,7 @@ export default function App() {
   const [accountFolderLabel, setAccountFolderLabel] = useState<string | null>(null);
   const accountFolderInputRef = useRef<HTMLInputElement | null>(null);
   const [logOpen, setLogOpen] = useState(false);
+  const [createAccountOpen, setCreateAccountOpen] = useState(false);
   // Client-only "pending" folders. AltaStata stores files keyed by `/`-separated
   // prefixes, so a folder is just the implicit parent of one or more files.
   // Until the user uploads a file into a freshly-created folder, that folder
@@ -280,14 +283,17 @@ export default function App() {
   };
 
   const handleAccountFolderSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const fileList = event.target.files;
+    const files = Array.from(event.target.files ?? []);
     event.target.value = "";
-    if (!fileList || fileList.length === 0) return;
+    if (files.length === 0) {
+      setSettingsError("No files received from folder picker. Try again, or use Chrome/Edge/Safari.");
+      return;
+    }
     setSettingsBusy(true);
     setSettingsError(null);
     setSettingsStatus("Loading account folder...");
     try {
-      await loadAccountFolderFromPicker(fileList);
+      await loadAccountFolderFromPicker(files);
       const material = getSessionAccountMaterial();
       setAccountFolderLabel(material
         ? `${material.displayName} (${material.myUser})`
@@ -317,6 +323,13 @@ export default function App() {
                 </IconButton>
               </span>
             </Tooltip>
+            <Tooltip title="Create account">
+              <span>
+                <IconButton size="small" onClick={() => setCreateAccountOpen(true)}>
+                  <PersonAddIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
             <Tooltip title="Connection settings">
               <span>
                 <IconButton size="small" onClick={openSettings}>
@@ -329,6 +342,11 @@ export default function App() {
       </AppBar>
 
       <LogDialog open={logOpen} onClose={() => setLogOpen(false)} />
+
+      <CreateAccountDialog
+        open={createAccountOpen}
+        onClose={() => setCreateAccountOpen(false)}
+      />
 
       <Box sx={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
         <MillerColumns
@@ -417,6 +435,9 @@ export default function App() {
                 {accountFolderLabel ?? "No folder selected (pick *user.properties + private keys)"}
               </Typography>
             </Stack>
+            <Typography variant="caption" color="text.secondary">
+              Pick one account folder (e.g. rsa.bob123), not the parent accounts directory.
+            </Typography>
             <FormControlLabel
               control={(
                 <Switch

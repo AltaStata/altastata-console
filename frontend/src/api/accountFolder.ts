@@ -47,8 +47,9 @@ function extractMyUser(userProperties: string): string {
   return "";
 }
 
-export async function parseAccountFolder(files: FileList): Promise<LoginV2UploadMaterial> {
-  if (!files || files.length === 0) {
+export async function parseAccountFolder(files: FileList | readonly File[]): Promise<LoginV2UploadMaterial> {
+  const fileArray = Array.from(files);
+  if (fileArray.length === 0) {
     throw new Error("No files selected from account folder.");
   }
 
@@ -56,9 +57,7 @@ export async function parseAccountFolder(files: FileList): Promise<LoginV2Upload
   const privateKeyFiles: File[] = [];
   let displayName = "";
 
-  for (let i = 0; i < files.length; i += 1) {
-    const file = files.item(i);
-    if (!file) continue;
+  for (const file of fileArray) {
     const relativePath = file.webkitRelativePath || file.name;
     if (!displayName) {
       const folder = topLevelFolderName(relativePath);
