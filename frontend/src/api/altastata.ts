@@ -1767,8 +1767,8 @@ function normalizeAccountFiles(raw: unknown): Record<string, Uint8Array> {
 }
 
 /**
- * Lists account types for Create account (always RSA, PQC, HPCS). HPCS keygen
- * is deferred — see CONSOLE_ACCOUNT_SETUP_DESIGN.md migration step 13.
+ * Lists account types for Create account (RSA, PQC, HPCS). HPCS requires the
+ * gateway to have GREP11 configured ({@code GREP11_YAML} / populated yaml).
  */
 export async function getSupportedAccountTypes(): Promise<AccountKeyType[]> {
   try {

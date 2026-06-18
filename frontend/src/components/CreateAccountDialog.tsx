@@ -176,24 +176,31 @@ export default function CreateAccountDialog({ open, onClose }: Props) {
                 disabled={busy}
                 fullWidth
                 size="small"
-                placeholder="rsa.myuser"
+                placeholder={accountType === "HPCS" ? "amazon.rsa.hpcs.myuser" : "rsa.myuser"}
                 helperText="Suggested name for ~/.altastata/accounts/&lt;name&gt;/. Leave blank for a random name."
               />
 
-              <TextField
-                label={passwordRequired ? "Password" : "Password (not used for HPCS)"}
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                disabled={busy || !passwordRequired}
-                fullWidth
-                size="small"
-                helperText={
-                  passwordRequired
-                    ? "Encrypts your private key files in the zip."
-                    : "HPCS stores the private key in the hardware security module."
-                }
-              />
+              {accountType === "HPCS" ? (
+                <Alert severity="info">
+                  HPCS keygen runs on the gateway via GREP11 (populated{" "}
+                  <code>grep11client.yaml</code> on the server, e.g.{" "}
+                  <code>GREP11_YAML</code>). No password — the IBM Cloud API key
+                  comes from that file. The zip includes{" "}
+                  <code>public.key</code>, <code>hpcs-privkey.blob</code>, and{" "}
+                  <code>hpcs.marker</code>.
+                </Alert>
+              ) : (
+                <TextField
+                  label="Password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={busy}
+                  fullWidth
+                  size="small"
+                  helperText="Encrypts your private key files in the zip."
+                />
+              )}
             </>
           ) : (
             <>
