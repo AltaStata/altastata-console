@@ -34,7 +34,7 @@ function isUserPropertiesBasename(name: string): boolean {
   return name.endsWith(".user.properties");
 }
 
-function extractMyUser(userProperties: string): string {
+function readUserProperty(userProperties: string, name: string): string {
   for (const raw of userProperties.split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
@@ -42,9 +42,32 @@ function extractMyUser(userProperties: string): string {
     if (idx < 0) continue;
     const key = line.slice(0, idx).trim();
     const value = line.slice(idx + 1).trim();
-    if (key === "myuser") return value;
+    if (key === name) return value;
   }
   return "";
+}
+
+function extractMyUser(userProperties: string): string {
+  return readUserProperty(userProperties, "myuser");
+}
+
+/** HSM accounts use a cloud KMS/HSM — no local private key file in the folder. */
+export function accountFolderRequiresPrivateKeyFiles(userProperties: string): boolean {
+  return readUserProperty(userProperties, "metadata-encryption") !== "HSM";
+}
+
+/**
+ * HPCS and HSM sign-in does not decrypt a local PEM with a user password
+ * (GREP11 / HSM PIN is configured on the gateway or in properties).
+ */
+export function accountLoginRequiresPassword(userProperties: string): boolean {
+  if (readUserProperty(userProperties, "metadata-encryption") === "HSM") {
+    return false;
+  }
+  if (readUserProperty(userProperties, "key-protection") === "HPCS") {
+    return false;
+  }
+  return true;
 }
 
 export async function parseAccountFolder(files: FileList | readonly File[]): Promise<LoginV2UploadMaterial> {
@@ -77,16 +100,18 @@ export async function parseAccountFolder(files: FileList | readonly File[]): Pro
   if (!userPropertiesFile) {
     throw new Error("Account folder must contain a *user.properties file.");
   }
-  if (privateKeyFiles.length === 0) {
-    throw new Error(
-      "Account folder must contain a private key file (private.key, kyber_private.key + dilithium_private.key, or hpcs-privkey.blob).",
-    );
-  }
 
   const userProperties = await userPropertiesFile.text();
   const myUser = extractMyUser(userProperties);
   if (!myUser) {
     throw new Error("user.properties is missing myuser=.");
+  }
+
+  const needsPrivateKeys = accountFolderRequiresPrivateKeyFiles(userProperties);
+  if (needsPrivateKeys && privateKeyFiles.length === 0) {
+    throw new Error(
+      "Account folder must contain a private key file (private.key, kyber_private.key + dilithium_private.key, or hpcs-privkey.blob).",
+    );
   }
 
   const accountFiles: Record<string, Uint8Array> = {};
