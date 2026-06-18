@@ -133,7 +133,7 @@ export default function CreateAccountDialog({ open, onClose }: Props) {
 
   return (
     <Dialog open={open} onClose={handleClose} fullWidth maxWidth="sm">
-      <DialogTitle>Create account</DialogTitle>
+      <DialogTitle>Generate keys</DialogTitle>
       <DialogContent dividers>
         <Stack spacing={2} sx={{ mt: 0.5 }}>
           <Typography variant="body2" color="text.secondary">
@@ -144,7 +144,7 @@ export default function CreateAccountDialog({ open, onClose }: Props) {
           {typesLoading && (
             <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
               <CircularProgress size={18} />
-              <Typography variant="body2">Loading supported account types...</Typography>
+              <Typography variant="body2">Loading supported key types...</Typography>
             </Box>
           )}
           {typesError && <Alert severity="error">{typesError}</Alert>}
@@ -154,10 +154,10 @@ export default function CreateAccountDialog({ open, onClose }: Props) {
           {!result ? (
             <>
               <FormControl fullWidth size="small" disabled={busy || typesLoading || supportedTypes.length === 0}>
-                <InputLabel id="create-account-type-label">Account type</InputLabel>
+                <InputLabel id="generate-keys-type-label">Key type</InputLabel>
                 <Select
-                  labelId="create-account-type-label"
-                  label="Account type"
+                  labelId="generate-keys-type-label"
+                  label="Key type"
                   value={supportedTypes.includes(accountType) ? accountType : ""}
                   onChange={(e) => setAccountType(e.target.value as AccountKeyType)}
                 >

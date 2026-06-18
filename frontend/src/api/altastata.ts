@@ -1728,7 +1728,7 @@ export function suggestMultiZipName(entries: ReadonlyArray<{ path: string }>): s
   return `altastata-download-${entries.length}-items.zip`;
 }
 
-/** All account keygen types (always shown in Create account UI). */
+/** All key types shown in the Generate keys dialog. */
 export const ALL_ACCOUNT_KEY_TYPES: AccountKeyType[] = ["RSA", "PQC", "HPCS"];
 
 /** Account keygen types for {@link generateAccountKeys}. */
@@ -1767,7 +1767,7 @@ function normalizeAccountFiles(raw: unknown): Record<string, Uint8Array> {
 }
 
 /**
- * Lists account types for Create account (RSA, PQC, HPCS). HPCS requires the
+ * Lists key types for Generate keys (RSA, PQC, HPCS). HPCS requires the
  * gateway to have GREP11 configured ({@code GREP11_YAML} / populated yaml).
  */
 export async function getSupportedAccountTypes(): Promise<AccountKeyType[]> {

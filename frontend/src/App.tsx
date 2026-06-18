@@ -18,7 +18,7 @@ import {
   Typography,
 } from "@mui/material";
 import SettingsIcon from "@mui/icons-material/Settings";
-import PersonAddIcon from "@mui/icons-material/PersonAdd";
+import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import {
   applyRuntimeSettings,
@@ -323,10 +323,10 @@ export default function App() {
                 </IconButton>
               </span>
             </Tooltip>
-            <Tooltip title="Create account">
+            <Tooltip title="Generate keys">
               <span>
                 <IconButton size="small" onClick={() => setCreateAccountOpen(true)}>
-                  <PersonAddIcon fontSize="small" />
+                  <VpnKeyIcon fontSize="small" />
                 </IconButton>
               </span>
             </Tooltip>
