@@ -78,4 +78,52 @@ describe("parseAccountFolder", () => {
     ]);
     await expect(parseAccountFolder(files)).rejects.toThrow(/user\.properties/);
   });
+
+  it("parses HSM account folder without local private key", async () => {
+    const props = [
+      "myuser=catrina777",
+      "accounttype=amazon-s3-secure",
+      "metadata-encryption=HSM",
+      "acccontainer-prefix=altastata-myorgrsa444-",
+    ].join("\n");
+    const files = asFileList([
+      makeFile(
+        "altastata-myorgrsa444-catrina777.user.properties",
+        "amazon.rsa.hsm.catrina777/altastata-myorgrsa444-catrina777.user.properties",
+        props,
+      ),
+    ]);
+
+    const material = await parseAccountFolder(files);
+
+    expect(material.displayName).toBe("amazon.rsa.hsm.catrina777");
+    expect(material.myUser).toBe("catrina777");
+    expect(Object.keys(material.accountFiles)).toEqual([]);
+  });
+
+  it("parses HPCS account folder with blob", async () => {
+    const props = [
+      "myuser=serge678",
+      "accounttype=amazon-s3-secure",
+      "metadata-encryption=RSA",
+      "key-protection=HPCS",
+    ].join("\n");
+    const files = asFileList([
+      makeFile(
+        "altastata-myorgrsa444-serge678.user.properties",
+        "amazon.rsa.hpcs.serge678/altastata-myorgrsa444-serge678.user.properties",
+        props,
+      ),
+      makeFile(
+        "hpcs-privkey.blob",
+        "amazon.rsa.hpcs.serge678/hpcs-privkey.blob",
+        new Uint8Array([1, 2, 3]).buffer,
+      ),
+    ]);
+
+    const material = await parseAccountFolder(files);
+
+    expect(material.myUser).toBe("serge678");
+    expect(material.accountFiles["hpcs-privkey.blob"]).toEqual(new Uint8Array([1, 2, 3]));
+  });
 });

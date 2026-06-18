@@ -21,6 +21,10 @@ import SettingsIcon from "@mui/icons-material/Settings";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import {
+  accountFolderRequiresPrivateKeyFiles,
+  accountLoginRequiresPassword,
+} from "@/api/accountFolder";
+import {
   applyRuntimeSettings,
   bootstrapCurrentSettings,
   getAccount,
@@ -298,7 +302,19 @@ export default function App() {
       setAccountFolderLabel(material
         ? `${material.displayName} (${material.myUser})`
         : null);
-      setSettingsStatus("Account folder loaded. Enter password and click Sign in.");
+      if (material) {
+        setSettingsDraft((prev) => ({
+          ...prev,
+          userName: material.myUser,
+          accountId: material.displayName || material.myUser,
+        }));
+      }
+      const needsPassword = material
+        ? accountLoginRequiresPassword(material.userProperties)
+        : true;
+      setSettingsStatus(needsPassword
+        ? "Account folder loaded. Enter password and click Sign in."
+        : "Account folder loaded. Click Sign in (no password needed for this account type).");
     } catch (e) {
       setSettingsError(e instanceof Error ? e.message : String(e));
       setSettingsStatus(null);
@@ -409,6 +425,13 @@ export default function App() {
               disabled={settingsBusy}
               fullWidth
               size="small"
+              helperText={(() => {
+                const material = getSessionAccountMaterial();
+                if (material && !accountLoginRequiresPassword(material.userProperties)) {
+                  return "Not required for HSM or HPCS accounts — leave blank and click Sign in.";
+                }
+                return undefined;
+              })()}
             />
             <input
               ref={(node) => {
@@ -432,7 +455,13 @@ export default function App() {
                 Choose account folder
               </Button>
               <Typography variant="body2" color="text.secondary">
-                {accountFolderLabel ?? "No folder selected (pick *user.properties + private keys)"}
+                {accountFolderLabel ?? (() => {
+                  const material = getSessionAccountMaterial();
+                  if (material && !accountFolderRequiresPrivateKeyFiles(material.userProperties)) {
+                    return "No folder selected (pick *user.properties — HSM accounts have no local private key)";
+                  }
+                  return "No folder selected (pick *user.properties + private keys)";
+                })()}
               </Typography>
             </Stack>
             <Typography variant="caption" color="text.secondary">

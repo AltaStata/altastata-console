@@ -1,6 +1,6 @@
 import protobufjs, { type Type } from "protobufjs/dist/protobuf";
 import type { AccountInfo, FileEntry, ListResponse, VersionEntry } from "@/types";
-import { parseAccountFolder } from "@/api/accountFolder";
+import { accountLoginRequiresPassword, parseAccountFolder } from "@/api/accountFolder";
 import type { LoginV2UploadMaterial } from "@/api/accountFolder";
 import { getRuntimeSettings, updateRuntimeSettings } from "@/config/runtimeSettings";
 import {
@@ -820,7 +820,7 @@ async function ensureAuthBootstrap(): Promise<void> {
       throw new Error("Choose an account folder in Settings before signing in.");
     }
     const password = config.accountPassword ?? "";
-    if (!password) {
+    if (accountLoginRequiresPassword(material.userProperties) && !password) {
       throw new Error("Password is required.");
     }
     const bootstrapUser = material.myUser;
@@ -853,7 +853,10 @@ async function maybeBootstrap(): Promise<void> {
 
 function canBootstrapFromEnv(): boolean {
   const config = getRuntimeSettings();
-  return Boolean(hasSessionAccountMaterial() && config.accountPassword);
+  const material = getSessionAccountMaterial();
+  if (!material) return false;
+  if (!accountLoginRequiresPassword(material.userProperties)) return true;
+  return Boolean(config.accountPassword);
 }
 
 function isPasswordBootstrapError(message: string): boolean {
@@ -1050,7 +1053,7 @@ export async function loginWithCurrentSettings(): Promise<void> {
     throw new Error("Choose an account folder first, or use Sign in.");
   }
   const accountPassword = getRuntimeSettings().accountPassword ?? "";
-  if (!accountPassword) {
+  if (accountLoginRequiresPassword(material.userProperties) && !accountPassword) {
     throw new Error("Password is required.");
   }
   await performLoginV2(accountPassword, material);
