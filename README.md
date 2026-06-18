@@ -100,11 +100,11 @@ showing recent `console.*` output captured by an in-app ring buffer
 auth issues without forcing the user to open browser DevTools, and shows
 the same lines that appear in the real console.
 
-### Create account (GenerateKeys)
+### Generate keys (GenerateKeys)
 
-The **person+** icon in the top bar opens **Create account**:
+The **key** icon in the top bar opens **Generate keys**:
 
-1. Pick account type (RSA, PQC, or HPCS (RSA)). HPCS keygen is deferred — use RSA/PQC to test Create Account until gateway HPCS keygen is wired (see `CONSOLE_ACCOUNT_SETUP_DESIGN.md` step 13).
+1. Pick key type (RSA, PQC, or HPCS (RSA)). HPCS requires GREP11 on the gateway (`GREP11_YAML` / populated `grep11client.yaml`).
 2. Optional folder name (e.g. `rsa.myuser`) and password (RSA/PQC only).
 3. **Generate keys** → **Download zip** (`<folder>.altastata.zip`).
 4. Unpack under `~/.altastata/accounts/`, send `public.key` to your org admin, save

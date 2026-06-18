@@ -133,7 +133,7 @@ export default function CreateAccountDialog({ open, onClose }: Props) {
 
   return (
     <Dialog open={open} onClose={handleClose} fullWidth maxWidth="sm">
-      <DialogTitle>Create account</DialogTitle>
+      <DialogTitle>Generate keys</DialogTitle>
       <DialogContent dividers>
         <Stack spacing={2} sx={{ mt: 0.5 }}>
           <Typography variant="body2" color="text.secondary">
@@ -144,7 +144,7 @@ export default function CreateAccountDialog({ open, onClose }: Props) {
           {typesLoading && (
             <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
               <CircularProgress size={18} />
-              <Typography variant="body2">Loading supported account types...</Typography>
+              <Typography variant="body2">Loading supported key types...</Typography>
             </Box>
           )}
           {typesError && <Alert severity="error">{typesError}</Alert>}
@@ -154,10 +154,10 @@ export default function CreateAccountDialog({ open, onClose }: Props) {
           {!result ? (
             <>
               <FormControl fullWidth size="small" disabled={busy || typesLoading || supportedTypes.length === 0}>
-                <InputLabel id="create-account-type-label">Account type</InputLabel>
+                <InputLabel id="generate-keys-type-label">Key type</InputLabel>
                 <Select
-                  labelId="create-account-type-label"
-                  label="Account type"
+                  labelId="generate-keys-type-label"
+                  label="Key type"
                   value={supportedTypes.includes(accountType) ? accountType : ""}
                   onChange={(e) => setAccountType(e.target.value as AccountKeyType)}
                 >
@@ -176,24 +176,31 @@ export default function CreateAccountDialog({ open, onClose }: Props) {
                 disabled={busy}
                 fullWidth
                 size="small"
-                placeholder="rsa.myuser"
+                placeholder={accountType === "HPCS" ? "amazon.rsa.hpcs.myuser" : "rsa.myuser"}
                 helperText="Suggested name for ~/.altastata/accounts/&lt;name&gt;/. Leave blank for a random name."
               />
 
-              <TextField
-                label={passwordRequired ? "Password" : "Password (not used for HPCS)"}
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                disabled={busy || !passwordRequired}
-                fullWidth
-                size="small"
-                helperText={
-                  passwordRequired
-                    ? "Encrypts your private key files in the zip."
-                    : "HPCS stores the private key in the hardware security module."
-                }
-              />
+              {accountType === "HPCS" ? (
+                <Alert severity="info">
+                  HPCS keygen runs on the gateway via GREP11 (populated{" "}
+                  <code>grep11client.yaml</code> on the server, e.g.{" "}
+                  <code>GREP11_YAML</code>). No password — the IBM Cloud API key
+                  comes from that file. The zip includes{" "}
+                  <code>public.key</code>, <code>hpcs-privkey.blob</code>, and{" "}
+                  <code>hpcs.marker</code>.
+                </Alert>
+              ) : (
+                <TextField
+                  label="Password"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  disabled={busy}
+                  fullWidth
+                  size="small"
+                  helperText="Encrypts your private key files in the zip."
+                />
+              )}
             </>
           ) : (
             <>
