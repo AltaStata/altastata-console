@@ -191,6 +191,8 @@ message GenerateKeysResponse {
 const root = protobufjs.parse(PROTO_DEF).root;
 const typeCache = new Map<string, Type>();
 const REQUEST_TIMEOUT_MS = 15_000;
+/** CreateFile waits on encrypted cloud I/O; under bulk folder upload (×4 concurrency) 15s is too short. */
+const UPLOAD_REQUEST_TIMEOUT_MS = 120_000;
 const LIST_DIR_FAST_TIMEOUT_MS = 5_000;
 
 function T(name: string): Type {
@@ -1368,6 +1370,7 @@ export async function uploadFile(targetPath: string, content: Uint8Array): Promi
         { filePath: cloudPath, content },
         "CreateFileResponse",
         true,
+        UPLOAD_REQUEST_TIMEOUT_MS,
     ));
     const status = resp.status as { error?: string; operationState?: string } | undefined;
     if (status?.error) {
