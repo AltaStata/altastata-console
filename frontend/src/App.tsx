@@ -261,6 +261,7 @@ export default function App() {
       }
       await bootstrapCurrentSettings();
       setSettingsStatus("Signed in.");
+      handleRefresh();
     } catch (e) {
       setSettingsError(e instanceof Error ? e.message : String(e));
       setSettingsStatus(null);
@@ -278,6 +279,7 @@ export default function App() {
       setSettingsDraft(saved);
       await loginWithCurrentSettings();
       setSettingsStatus("Signed in.");
+      handleRefresh();
     } catch (e) {
       setSettingsError(e instanceof Error ? e.message : String(e));
       setSettingsStatus(null);
