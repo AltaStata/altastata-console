@@ -4,6 +4,7 @@ import { Box, Button, Stack, Typography } from "@mui/material";
 import SettingsIcon from "@mui/icons-material/Settings";
 import { isUserNotInitializedError, listDir } from "@/api/altastata";
 import type { FileEntry } from "@/types";
+import type { DeletingTarget } from "@/utils/deletingTargets";
 import FileColumn from "./FileColumn";
 import PreviewPane from "./PreviewPane";
 
@@ -35,6 +36,8 @@ interface Props {
    * though it does not yet exist in the cloud listing.
    */
   pendingFolderPaths?: Set<string>;
+  /** Paths currently being deleted — descendants show a distinct icon until delete completes. */
+  deletingTargets?: DeletingTarget[];
   /**
    * Called after each backend listing refresh with the set of folder paths
    * that the backend ACTUALLY returned. The owner uses this to drop pending
@@ -58,6 +61,7 @@ interface Props {
 export default function MillerColumns({
   reloadToken = 0,
   pendingFolderPaths,
+  deletingTargets,
   onRealFolderPaths,
   onSelectionContextChange,
   onOpenSettings,
@@ -459,6 +463,7 @@ export default function MillerColumns({
                   isActive={idx === activeColumnIdx}
                   entries={col.entries}
                   selectedPaths={col.selectedPaths}
+                  deletingTargets={deletingTargets}
                   onActivate={() => setActiveColumnIdx(idx)}
                   onSelect={(e, modifiers) => void handleSelect(idx, e, { modifiers })}
                 />

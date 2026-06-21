@@ -193,6 +193,8 @@ const typeCache = new Map<string, Type>();
 const REQUEST_TIMEOUT_MS = 15_000;
 /** CreateFile waits on encrypted cloud I/O; under bulk folder upload (×4 concurrency) 15s is too short. */
 const UPLOAD_REQUEST_TIMEOUT_MS = 120_000;
+/** Delete with includingSubdirectories walks encrypted metadata; large trees need minutes, not seconds. */
+const DELETE_REQUEST_TIMEOUT_MS = 300_000;
 const LIST_DIR_FAST_TIMEOUT_MS = 5_000;
 
 function T(name: string): Type {
@@ -1398,6 +1400,7 @@ export async function deletePath(path: string): Promise<void> {
         },
         "DeleteResponse",
         true,
+        DELETE_REQUEST_TIMEOUT_MS,
     ));
     const statuses = Array.isArray(resp.statuses)
       ? (resp.statuses as { error?: string }[])
