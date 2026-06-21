@@ -6,7 +6,9 @@ import {
   ListItemText,
 } from "@mui/material";
 import FolderIcon from "@mui/icons-material/Folder";
+import FolderDeleteIcon from "@mui/icons-material/FolderDelete";
 import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFile";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import ImageIcon from "@mui/icons-material/Image";
 import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
@@ -17,12 +19,18 @@ import CodeIcon from "@mui/icons-material/Code";
 import MovieIcon from "@mui/icons-material/Movie";
 import AudioFileIcon from "@mui/icons-material/AudioFile";
 import type { FileEntry } from "@/types";
+import {
+  isEntryDeleting,
+  isRecursiveDeleteRoot,
+  type DeletingTarget,
+} from "@/utils/deletingTargets";
 
 interface Props {
   title: string;
   isActive: boolean;
   entries: FileEntry[];
   selectedPaths: Set<string>;
+  deletingTargets?: DeletingTarget[];
   onActivate: () => void;
   onSelect: (entry: FileEntry, modifiers: { ctrl: boolean; shift: boolean }) => void;
 }
@@ -31,6 +39,13 @@ function ext(name: string): string {
   const idx = name.lastIndexOf(".");
   if (idx < 0 || idx === name.length - 1) return "";
   return name.slice(idx + 1).toLowerCase();
+}
+
+function deletingIcon(entry: FileEntry) {
+  if (entry.is_dir) {
+    return <FolderDeleteIcon fontSize="small" sx={{ color: "warning.main" }} />;
+  }
+  return <DeleteOutlineIcon fontSize="small" sx={{ color: "warning.main" }} />;
 }
 
 function fileIcon(entry: FileEntry) {
@@ -71,6 +86,7 @@ export default function FileColumn({
   isActive,
   entries,
   selectedPaths,
+  deletingTargets,
   onActivate,
   onSelect,
 }: Props) {
@@ -110,25 +126,40 @@ export default function FileColumn({
       <List dense disablePadding sx={{ flex: 1, overflow: "auto" }}>
         {entries.map((entry) => {
           const isSelected = selectedPaths.has(entry.path);
+          const isDeleting = isEntryDeleting(entry, deletingTargets);
+          const isDeleteRoot = isRecursiveDeleteRoot(entry, deletingTargets);
+          const showDeletingChrome = isDeleting && !isDeleteRoot;
           return (
             <ListItemButton
               key={entry.path}
               selected={isSelected}
+              disabled={showDeletingChrome && !entry.is_dir}
               onClick={(event) => {
+                if (showDeletingChrome && !entry.is_dir) return;
                 onActivate();
                 onSelect(entry, {
                   ctrl: event.ctrlKey || event.metaKey,
                   shift: event.shiftKey,
                 });
               }}
-              sx={{ pr: 0.5, userSelect: "none" }}
+              sx={{
+                pr: 0.5,
+                userSelect: "none",
+                opacity: showDeletingChrome ? 0.65 : 1,
+              }}
             >
               <ListItemIcon sx={{ minWidth: 28 }}>
-                {fileIcon(entry)}
+                {showDeletingChrome ? deletingIcon(entry) : fileIcon(entry)}
               </ListItemIcon>
               <ListItemText
-                primary={entry.name}
-                primaryTypographyProps={{ noWrap: true, variant: "body2" }}
+                primary={showDeletingChrome ? `${entry.name} (deleting…)` : entry.name}
+                primaryTypographyProps={{
+                  noWrap: true,
+                  variant: "body2",
+                  sx: showDeletingChrome
+                    ? { fontStyle: "italic", color: "warning.main" }
+                    : undefined,
+                }}
               />
               {entry.is_dir && (
                 <ChevronRightIcon fontSize="small" sx={{ opacity: 0.5 }} />

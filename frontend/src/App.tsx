@@ -41,6 +41,11 @@ import BottomToolbar from "@/components/BottomToolbar";
 import LogDialog from "@/components/LogDialog";
 import CreateAccountDialog from "@/components/CreateAccountDialog";
 import { installLogBuffer } from "@/utils/logBuffer";
+import {
+  mergeDeletingTargets,
+  removeDeletingTargets,
+  type DeletingTarget,
+} from "@/utils/deletingTargets";
 
 // Install once at module load so we capture every console.* call from then on,
 // including the very first network errors before <App /> mounts.
@@ -74,6 +79,7 @@ export default function App() {
   const [pendingFolderPaths, setPendingFolderPaths] = useState<Set<string>>(
     () => new Set(),
   );
+  const [deletingTargets, setDeletingTargets] = useState<DeletingTarget[]>([]);
 
   useEffect(() => {
     getAccount()
@@ -88,6 +94,14 @@ export default function App() {
       next.add(fullPath);
       return next;
     });
+  }, []);
+
+  const markPathsDeleting = useCallback((targets: DeletingTarget[]) => {
+    setDeletingTargets((prev) => mergeDeletingTargets(prev, targets));
+  }, []);
+
+  const unmarkPathsDeleting = useCallback((targets: DeletingTarget[]) => {
+    setDeletingTargets((prev) => removeDeletingTargets(prev, targets));
   }, []);
 
   // When MillerColumns reloads the backend listing and now sees a real folder
@@ -370,6 +384,7 @@ export default function App() {
         <MillerColumns
           reloadToken={reloadToken}
           pendingFolderPaths={pendingFolderPaths}
+          deletingTargets={deletingTargets}
           onRealFolderPaths={reconcilePendingFolders}
           onSelectionContextChange={handleSelectionContextChange}
           onOpenSettings={openSettings}
@@ -381,6 +396,8 @@ export default function App() {
         activePath={activePath}
         pendingFolderPaths={pendingFolderPaths}
         onAddPendingFolder={addPendingFolder}
+        onMarkPathsDeleting={markPathsDeleting}
+        onUnmarkPathsDeleting={unmarkPathsDeleting}
         onRefresh={handleRefresh}
       />
 

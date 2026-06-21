@@ -44,6 +44,7 @@ import {
 
 const FOLDER_UPLOAD_CONCURRENCY = 4;
 import type { FileEntry } from "@/types";
+import type { DeletingTarget } from "@/utils/deletingTargets";
 
 interface Props {
   selectedEntries: FileEntry[];
@@ -61,6 +62,8 @@ interface Props {
    * the FULL absolute path (e.g. `/foo/new-dir`).
    */
   onAddPendingFolder?: (fullPath: string) => void;
+  onMarkPathsDeleting?: (targets: DeletingTarget[]) => void;
+  onUnmarkPathsDeleting?: (targets: DeletingTarget[]) => void;
   onRefresh: () => void;
 }
 
@@ -87,6 +90,8 @@ export default function BottomToolbar({
   activePath,
   pendingFolderPaths,
   onAddPendingFolder,
+  onMarkPathsDeleting,
+  onUnmarkPathsDeleting,
   onRefresh,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -410,12 +415,34 @@ export default function BottomToolbar({
       : `Delete ${selectionCount} items?\n\n${selectedEntries.map((e) => e.path).join("\n")}`;
     const confirmed = window.confirm(message);
     if (!confirmed) return;
+    const targets = [...selectedEntries];
+    const deletingMarks: DeletingTarget[] = targets.map((entry) => ({
+      path: entry.path,
+      recursive: entry.is_dir,
+    }));
     const label = selectionCount === 1 ? "Delete" : `Delete ${selectionCount} items`;
-    await runAction(label, async () => {
-      for (const entry of selectedEntries) {
+    onMarkPathsDeleting?.(deletingMarks);
+    setBusy(true);
+    try {
+      for (let i = 0; i < targets.length; i += 1) {
+        const entry = targets[i];
+        const mark: DeletingTarget = { path: entry.path, recursive: entry.is_dir };
+        setStatus(`${label} ${i + 1}/${targets.length}: ${entry.path}`);
         await deletePath(entry.path);
+        onUnmarkPathsDeleting?.([mark]);
       }
-    });
+      setStatus(`${label} done`);
+      onRefresh();
+    } catch (error) {
+      onUnmarkPathsDeleting?.(deletingMarks);
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setStatus(`${label} cancelled`);
+        return;
+      }
+      setStatus(error instanceof Error ? `${label} failed: ${error.message}` : `${label} failed`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   type AccessDialogMode = "share" | "revoke";
