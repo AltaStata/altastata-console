@@ -237,24 +237,59 @@ export default function BottomToolbar({
     event.target.value = "";
     if (files.length === 0) return;
 
+    const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+    const inFlight = new Map<number, number>();
+    let completedFiles = 0;
+    let completedBytes = 0;
+
+    const reportFolderUploadProgress = (currentName?: string) => {
+      const inFlightBytes = Array.from(inFlight.values()).reduce((sum, n) => sum + n, 0);
+      const transferred = completedBytes + inFlightBytes;
+      if (totalBytes > 0) {
+        setTransferPercent(Math.min(100, (transferred / totalBytes) * 100));
+      } else {
+        setTransferPercent(null);
+      }
+      const bytesPart = totalBytes > 0
+        ? `${Math.min(transferred, totalBytes).toLocaleString("en-US")}/${totalBytes.toLocaleString("en-US")} bytes`
+        : `${transferred.toLocaleString("en-US")} bytes`;
+      const waitHint = transferred === 0 ? ", preparing" : "";
+      const filePart = currentName
+        ? `, ${currentName}`
+        : completedFiles < files.length
+          ? ", starting uploads"
+          : "";
+      setStatus(
+        `Uploading folder (${completedFiles}/${files.length} files, ${bytesPart}${waitHint}${filePart})...`,
+      );
+    };
+
     setBusy(true);
-    let completed = 0;
-    setStatus(`Uploading folder (0/${files.length}, ×${FOLDER_UPLOAD_CONCURRENCY})...`);
+    reportFolderUploadProgress();
     try {
-      await runWithConcurrency(files, FOLDER_UPLOAD_CONCURRENCY, async (file) => {
+      await runWithConcurrency(files, FOLDER_UPLOAD_CONCURRENCY, async (file, index) => {
         const relativePath = file.webkitRelativePath || file.name;
         const targetPath = resolveUploadTargetPath(relativePath, uploadAnchor, activePath);
-        await uploadBrowserFile(targetPath, file);
-        completed += 1;
-        setStatus(`Uploading folder (${completed}/${files.length}, ×${FOLDER_UPLOAD_CONCURRENCY})...`);
+        const displayName = relativePath.split("/").pop() ?? file.name;
+        inFlight.set(index, 0);
+        reportFolderUploadProgress(displayName);
+        await uploadBrowserFile(targetPath, file, (uploaded) => {
+          inFlight.set(index, uploaded);
+          reportFolderUploadProgress(displayName);
+        });
+        inFlight.delete(index);
+        completedBytes += file.size;
+        completedFiles += 1;
+        reportFolderUploadProgress();
       });
-      setStatus(`Folder upload done (${completed}/${files.length})`);
+      setStatus(`Folder upload done (${completedFiles}/${files.length})`);
       onRefresh();
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      setStatus(`Folder upload failed after ${completed}/${files.length}: ${detail}`);
+      setStatus(`Folder upload failed after ${completedFiles}/${files.length}: ${detail}`);
     } finally {
       setBusy(false);
+      setTransferPercent(null);
     }
   };
 
@@ -268,11 +303,21 @@ export default function BottomToolbar({
     setStatus("Download started (watch browser downloads for completion)");
   };
 
-  const streamZipToHandle = async (handle: SaveFileHandle, path: string) => {
+  const streamZipToHandle = async (
+    handle: SaveFileHandle,
+    path: string,
+    onProgress?: (downloadedBytes: number) => void,
+    signal?: AbortSignal,
+  ) => {
+    markDownloadWaiting(null);
     const writable = await handle.createWritable();
     try {
       await streamDirectoryZip(path, async (chunk) => {
         await writable.write(chunk);
+      }, {
+        onProgress,
+        signal,
+        onStreamOpen: () => markDownloadWaiting(null),
       });
       await writable.close();
     } catch (error) {
@@ -406,7 +451,12 @@ export default function BottomToolbar({
         }
       }
       if (entry.is_dir) {
-        await streamZipToHandle(saveHandle as SaveFileHandle, entry.path);
+        await streamZipToHandle(
+          saveHandle as SaveFileHandle,
+          entry.path,
+          (downloaded) => reportDownloadProgress(downloaded, null),
+          downloadAbort.signal,
+        );
       } else {
         await streamFileToHandle(
           saveHandle as SaveFileHandle,

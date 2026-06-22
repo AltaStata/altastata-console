@@ -2041,6 +2041,8 @@ const ZIP_STREAM_IDLE_TIMEOUT_MS = 60_000;
 export interface StreamDirectoryZipOptions {
   signal?: AbortSignal;
   idleTimeoutMs?: number;
+  onProgress?: (downloadedBytes: number) => void;
+  onStreamOpen?: () => void;
 }
 
 export async function streamDirectoryZip(
@@ -2053,6 +2055,8 @@ export async function streamDirectoryZip(
     const cloudPath = toCloudPath(path);
     // eslint-disable-next-line no-console
     console.info("[altastata] streamDirectoryZip", { path, cloudPath });
+    let downloaded = 0;
+    options.onProgress?.(0);
     let writeChain: Promise<void> = Promise.resolve();
     await withBootstrapRetry(() => grpcServerStreamWithCallback(
       "altastata.v1.FileOpsService/DownloadDirectoryAsZip",
@@ -2070,11 +2074,16 @@ export async function streamDirectoryZip(
           if (arr.length > 0) chunk = arr;
         }
         if (!chunk) return;
-        writeChain = writeChain.then(() => onChunk(chunk as Uint8Array));
+        writeChain = writeChain.then(async () => {
+          await onChunk(chunk as Uint8Array);
+          downloaded += (chunk as Uint8Array).length;
+          options.onProgress?.(downloaded);
+        });
       },
       {
         idleTimeoutMs: options.idleTimeoutMs ?? ZIP_STREAM_IDLE_TIMEOUT_MS,
         signal: options.signal,
+        onStreamOpen: options.onStreamOpen,
         pipeline: true,
       },
     ));
