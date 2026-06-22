@@ -30,7 +30,6 @@ import {
   getAccount,
   hasSessionAccountMaterial,
   loadAccountFolderFromPicker,
-  loginWithCurrentSettings,
   subscribeToAltaStataEvents,
 } from "@/api/altastata";
 import { getSessionAccountMaterial } from "@/session/accountMaterial";
@@ -284,24 +283,6 @@ export default function App() {
     }
   };
 
-  const handleReSignIn = async () => {
-    setSettingsBusy(true);
-    setSettingsError(null);
-    setSettingsStatus("Re-signing in...");
-    try {
-      const saved = await persistAndRefresh();
-      setSettingsDraft(saved);
-      await loginWithCurrentSettings();
-      setSettingsStatus("Signed in.");
-      handleRefresh();
-    } catch (e) {
-      setSettingsError(e instanceof Error ? e.message : String(e));
-      setSettingsStatus(null);
-    } finally {
-      setSettingsBusy(false);
-    }
-  };
-
   const handleAccountFolderSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     event.target.value = "";
@@ -501,13 +482,6 @@ export default function App() {
         <DialogActions>
           <Button onClick={closeSettings} disabled={settingsBusy}>Close</Button>
           <Button onClick={() => void handleSave()} disabled={settingsBusy} variant="outlined">Save</Button>
-          <Button
-            onClick={() => void handleReSignIn()}
-            disabled={settingsBusy || !hasSessionAccountMaterial()}
-            variant="outlined"
-          >
-            Re-sign in
-          </Button>
           <Button onClick={() => void handleSaveAndSignIn()} disabled={settingsBusy} variant="contained">
             Sign in
           </Button>

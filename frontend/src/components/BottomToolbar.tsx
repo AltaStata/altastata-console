@@ -36,10 +36,11 @@ import {
   revokePaths,
   runWithConcurrency,
   sharePaths,
+  streamFileDownload,
   streamDirectoryZip,
   suggestMultiZipName,
   suggestedZipFileName,
-  uploadFile,
+  uploadBrowserFile,
 } from "@/api/altastata";
 
 const FOLDER_UPLOAD_CONCURRENCY = 4;
@@ -98,6 +99,8 @@ export default function BottomToolbar({
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string>("Ready");
+  /** 0–100 when byte progress is known; null = indeterminate spinner bar. */
+  const [transferPercent, setTransferPercent] = useState<number | null>(null);
   const [filterText, setFilterText] = useState("");
   const [newFolderDialog, setNewFolderDialog] = useState<
     { name: string; error: string | null } | null
@@ -158,6 +161,7 @@ export default function BottomToolbar({
 
   const runAction = async (label: string, fn: () => Promise<void>) => {
     setBusy(true);
+    setTransferPercent(null);
     setStatus(`${label}...`);
     try {
       await fn();
@@ -171,7 +175,24 @@ export default function BottomToolbar({
       setStatus(error instanceof Error ? `${label} failed: ${error.message}` : `${label} failed`);
     } finally {
       setBusy(false);
+      setTransferPercent(null);
     }
+  };
+
+  const reportByteProgress = (
+    transferred: number,
+    total: number | null | undefined,
+    label: "Uploading" | "Downloading",
+  ) => {
+    if (total != null && total > 0) {
+      setTransferPercent(Math.min(100, (transferred / total) * 100));
+      const cap = Math.min(transferred, total).toLocaleString("en-US");
+      const all = total.toLocaleString("en-US");
+      setStatus(`${label} (${cap}/${all} bytes)...`);
+      return;
+    }
+    setTransferPercent(null);
+    setStatus(`${label} (${transferred.toLocaleString("en-US")} bytes)...`);
   };
 
   const handleUploadClick = () => {
@@ -184,8 +205,10 @@ export default function BottomToolbar({
     if (!file) return;
     const targetPath = resolveUploadTargetPath(file.name, uploadAnchor, activePath);
     await runAction("Upload", async () => {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      await uploadFile(targetPath, bytes);
+      setStatus("Uploading (starting...)");
+      await uploadBrowserFile(targetPath, file, (uploaded, total) => {
+        reportByteProgress(uploaded, total, "Uploading");
+      });
     });
     event.target.value = "";
   };
@@ -207,8 +230,7 @@ export default function BottomToolbar({
       await runWithConcurrency(files, FOLDER_UPLOAD_CONCURRENCY, async (file) => {
         const relativePath = file.webkitRelativePath || file.name;
         const targetPath = resolveUploadTargetPath(relativePath, uploadAnchor, activePath);
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        await uploadFile(targetPath, bytes);
+        await uploadBrowserFile(targetPath, file);
         completed += 1;
         setStatus(`Uploading folder (${completed}/${files.length}, ×${FOLDER_UPLOAD_CONCURRENCY})...`);
       });
@@ -238,6 +260,32 @@ export default function BottomToolbar({
       await streamDirectoryZip(path, async (chunk) => {
         await writable.write(chunk);
       });
+      await writable.close();
+    } catch (error) {
+      try {
+        await writable.abort();
+      } catch {
+        // Ignore abort errors if writer is already closed.
+      }
+      throw error;
+    }
+  };
+
+  const reportDownloadProgress = (downloaded: number, total: number | null | undefined) => {
+    reportByteProgress(downloaded, total, "Downloading");
+  };
+
+  const streamFileToHandle = async (
+    handle: SaveFileHandle,
+    path: string,
+    version: string | null,
+    onProgress?: (downloadedBytes: number) => void,
+  ) => {
+    const writable = await handle.createWritable();
+    try {
+      await streamFileDownload(path, version, async (chunk) => {
+        await writable.write(chunk);
+      }, { onProgress });
       await writable.close();
     } catch (error) {
       try {
@@ -313,14 +361,34 @@ export default function BottomToolbar({
       return;
     }
 
-    await runAction("Download", async () => {
+    const totalBytes = entry.is_dir ? null : entry.size;
+    setBusy(true);
+    setTransferPercent(null);
+    setStatus("Downloading (starting...)");
+    try {
       if (entry.is_dir) {
         await streamZipToHandle(saveHandle as SaveFileHandle, entry.path);
-        return;
+      } else {
+        await streamFileToHandle(
+          saveHandle as SaveFileHandle,
+          entry.path,
+          entry.version,
+          (downloaded) => reportDownloadProgress(downloaded, totalBytes),
+        );
       }
-      const blob = await downloadFile(entry.path, entry.version);
-      await writeBlobToHandle(saveHandle as SaveFileHandle, blob);
-    });
+      setStatus("Download done");
+      onRefresh();
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setStatus("Download cancelled");
+      } else {
+        const detail = error instanceof Error ? error.message : String(error);
+        setStatus(`Download failed: ${detail}`);
+      }
+    } finally {
+      setBusy(false);
+      setTransferPercent(null);
+    }
   };
 
   const downloadEntryAsBytes = async (entry: FileEntry): Promise<Uint8Array> => {
@@ -680,12 +748,18 @@ export default function BottomToolbar({
         <Typography
           variant="caption"
           color={status.includes("failed") ? "error.main" : "text.secondary"}
-          sx={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          sx={{ maxWidth: 480, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
           title={status}
         >
           {status}
         </Typography>
-        {busy && <LinearProgress sx={{ width: 96 }} />}
+        {busy && (
+          <LinearProgress
+            variant={transferPercent != null ? "determinate" : "indeterminate"}
+            value={transferPercent ?? 0}
+            sx={{ width: 128 }}
+          />
+        )}
         <Tooltip title="View options">
           <span>
             <IconButton size="small" disabled>

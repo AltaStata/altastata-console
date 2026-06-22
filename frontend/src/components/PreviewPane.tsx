@@ -1,26 +1,19 @@
 import { useEffect, useState } from "react";
 import { Box, Stack, Typography } from "@mui/material";
 import {
-  fetchFilePreviewMetadata,
-  fetchPreviewBlob,
+  fetchPreviewBlobCapped,
   fetchTextPreviewChunk,
-  type FilePreviewMetadata,
 } from "@/api/altastata";
 import type { FileEntry } from "@/types";
 
 interface Props {
   file: FileEntry | null;
-  /**
-   * Bumped by the parent whenever the surrounding file list is reloaded
-   * (e.g. after Share / Revoke / Delete / Upload). The file's path+version
-   * are stable across an ACL change, so we cannot rely on `file` identity
-   * alone to refresh server-side metadata such as the readers list.
-   */
-  refreshToken?: number;
 }
 
 const TEXT_PREVIEW_CHUNK_BYTES = 4 * 1024;
+const PREVIEW_INLINE_MAX_BYTES = 16 * 1024 * 1024;
 const MAX_INLINE_TEXT_CHARS = 20_000;
+const MEDIA_PREVIEW_TIMEOUT_MS = 10_000;
 
 function formatBytes(n: number | null): string {
   if (n == null) return "—";
@@ -32,34 +25,26 @@ function clampTextPreview(value: string): string {
   return `${value.slice(0, MAX_INLINE_TEXT_CHARS)}\n\n... preview truncated ...`;
 }
 
-export default function PreviewPane({ file, refreshToken = 0 }: Props) {
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeout: number | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeout = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout != null) window.clearTimeout(timeout);
+  }
+}
+
+export default function PreviewPane({ file }: Props) {
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
   const [textPreview, setTextPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
-  const [metadata, setMetadata] = useState<FilePreviewMetadata | null>(null);
   const [previewNotice, setPreviewNotice] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!file || file.is_dir) {
-      setMetadata(null);
-      return;
-    }
-    let disposed = false;
-    void (async () => {
-      try {
-        const details = await fetchFilePreviewMetadata(file.path, file.version);
-        if (disposed) return;
-        setMetadata(details);
-      } catch {
-        if (disposed) return;
-        setMetadata(null);
-      }
-    })();
-    return () => {
-      disposed = true;
-    };
-  }, [file, refreshToken]);
 
   useEffect(() => {
     if (!file || file.is_dir) {
@@ -103,14 +88,43 @@ export default function PreviewPane({ file, refreshToken = 0 }: Props) {
           return;
         }
 
-        const blob = await fetchPreviewBlob(file.path, file.version, file.mime_type);
+        const { blob, truncated } = await withTimeout(
+          fetchPreviewBlobCapped(
+            file.path,
+            file.version,
+            file.mime_type,
+            PREVIEW_INLINE_MAX_BYTES,
+          ),
+          isVideo || isAudio ? MEDIA_PREVIEW_TIMEOUT_MS : 30_000,
+          "Preview request timed out",
+        );
         if (disposed) return;
+
+        if (truncated && (isVideo || isAudio)) {
+          setPreviewNotice(
+            `Cannot build ${isVideo ? "video" : "audio"} preview within ${formatBytes(PREVIEW_INLINE_MAX_BYTES)}. Download the file to open it fully.`,
+          );
+          return;
+        }
 
         objectUrl = URL.createObjectURL(blob);
         setPreviewSrc(objectUrl);
+        if (truncated) {
+          setPreviewNotice(
+            `Preview shows first ${formatBytes(PREVIEW_INLINE_MAX_BYTES)}. Download to access full file.`,
+          );
+        }
       } catch (error) {
         if (disposed) return;
-        setPreviewError(error instanceof Error ? error.message : String(error));
+        const message = error instanceof Error ? error.message : String(error);
+        if ((isVideo || isAudio) && /preview request timed out/i.test(message)) {
+          setPreviewNotice(
+            `Cannot build ${isVideo ? "video" : "audio"} preview in time. Download the file to open it fully.`,
+          );
+          setPreviewError(null);
+          return;
+        }
+        setPreviewError(message);
       } finally {
         if (!disposed) setLoading(false);
       }
@@ -144,11 +158,9 @@ export default function PreviewPane({ file, refreshToken = 0 }: Props) {
   const isText = file.mime_type?.startsWith("text/");
   const isVideo = file.mime_type?.startsWith("video/");
   const isAudio = file.mime_type?.startsWith("audio/");
-  const resolvedSize = metadata?.size ?? file.size ?? null;
-  const sizeText = resolvedSize != null
-    ? formatBytes(resolvedSize)
-    : (metadata?.sizeRaw ?? "—");
-  const resolvedReaders = metadata?.readers.length ? metadata.readers : file.readers;
+  const sizeText = file.size != null
+    ? formatBytes(file.size)
+    : "—";
 
   if (file.is_dir) {
     return (
@@ -208,15 +220,10 @@ export default function PreviewPane({ file, refreshToken = 0 }: Props) {
               | Created: {file.created}
             </Typography>
           )}
-          {metadata?.tag && (
-            <Typography variant="caption" color="text.secondary">
-              by {metadata.tag}
-            </Typography>
-          )}
         </Stack>
-        {resolvedReaders.length > 0 && (
+        {file.readers.length > 0 && (
           <Typography variant="caption" color="text.secondary">
-            Readers: {resolvedReaders.join(", ")}
+            Readers: {file.readers.join(", ")}
           </Typography>
         )}
       </Box>

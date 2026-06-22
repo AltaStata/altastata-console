@@ -133,6 +133,30 @@ message DownloadDirectoryAsZipRequest {
   string cloud_path_prefix = 1;
 }
 message DownloadDirectoryAsZipChunk { bytes data = 1; }
+message BeginUploadRequest {
+  string cloud_path = 1;
+  int64 total_size = 2;
+}
+message BeginUploadResponse {
+  string upload_id = 1;
+  int32 chunk_size = 2;
+}
+message UploadChunkRequest {
+  string upload_id = 1;
+  int64 offset = 2;
+  bytes data = 3;
+}
+message UploadChunkResponse {
+  int64 bytes_received = 1;
+}
+message CompleteUploadRequest {
+  string upload_id = 1;
+}
+message CompleteUploadResponse { FileStatus status = 1; }
+message AbortUploadRequest {
+  string upload_id = 1;
+}
+message AbortUploadResponse { bool aborted = 1; }
 message WatchRequest {
   uint64 since_sequence = 1;
 }
@@ -193,9 +217,15 @@ const typeCache = new Map<string, Type>();
 const REQUEST_TIMEOUT_MS = 15_000;
 /** CreateFile waits on encrypted cloud I/O; under bulk folder upload (×4 concurrency) 15s is too short. */
 const UPLOAD_REQUEST_TIMEOUT_MS = 120_000;
+const UPLOAD_INLINE_MAX_BYTES = 32 * 1024 * 1024;
+const UPLOAD_CHUNK_TIMEOUT_MS = 120_000;
+const DEFAULT_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 /** Delete with includingSubdirectories walks encrypted metadata; large trees need minutes, not seconds. */
 const DELETE_REQUEST_TIMEOUT_MS = 300_000;
 const LIST_DIR_FAST_TIMEOUT_MS = 5_000;
+/** Large-file ReadStream: allow slow disk writes between chunks without aborting. */
+const FILE_DOWNLOAD_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+const FILE_DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 
 function T(name: string): Type {
   const cached = typeCache.get(name);
@@ -774,10 +804,59 @@ function generateUuid(): string {
   return `${rand()}-${rand()}-${rand()}-${rand()}`;
 }
 
+function readUserProperty(userProperties: string, key: string): string {
+  for (const raw of userProperties.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const idx = line.indexOf("=");
+    if (idx < 0) continue;
+    if (line.slice(0, idx).trim() !== key) continue;
+    return line.slice(idx + 1).trim();
+  }
+  return "";
+}
+
+function sanitizeCloudEndpoint(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return trimmed;
+  }
+}
+
+function summarizeAccountMaterial(material: LoginV2UploadMaterial) {
+  const accountType = readUserProperty(material.userProperties, "accounttype") || null;
+  const containerPrefix = readUserProperty(material.userProperties, "acccontainer-prefix") || null;
+  const azureAccount = sanitizeCloudEndpoint(readUserProperty(material.userProperties, "azure-account"));
+  const provider = accountType?.startsWith("azure") ? "azure"
+    : accountType?.startsWith("amazon") ? "amazon"
+      : accountType?.startsWith("ibm") ? "ibm"
+        : "unknown";
+  return {
+    provider,
+    accountType,
+    displayName: material.displayName,
+    myUser: material.myUser,
+    containerPrefix,
+    azureAccount,
+    keyFiles: Object.keys(material.accountFiles).sort(),
+  };
+}
+
 async function performLoginV2(
   password: string,
   material: LoginV2UploadMaterial,
 ): Promise<void> {
+  const accountSummary = summarizeAccountMaterial(material);
+  // eslint-disable-next-line no-console
+  console.info("[altastata] LoginV2 request account", {
+    ...accountSummary,
+    clientHint: getClientHint(),
+    hasPassword: Boolean(password),
+  });
   let resp: Record<string, unknown>;
   try {
     resp = await grpcUnary(
@@ -809,6 +888,13 @@ async function performLoginV2(
     userName: material.myUser,
     accountId: material.displayName || material.myUser,
   });
+  const updated = getRuntimeSettings();
+  // eslint-disable-next-line no-console
+  console.info("[altastata] LoginV2 runtime settings", {
+    accountId: updated.accountId,
+    userName: updated.userName,
+    grpcBaseUrl: updated.grpcBaseUrl,
+  });
 }
 
 async function ensureAuthBootstrap(): Promise<void> {
@@ -829,7 +915,12 @@ async function ensureAuthBootstrap(): Promise<void> {
     }
     const bootstrapUser = material.myUser;
     // eslint-disable-next-line no-console
-    console.info("[altastata] LoginV2 start", { user: bootstrapUser });
+    console.info("[altastata] LoginV2 start", {
+      user: bootstrapUser,
+      runtimeAccountId: config.accountId,
+      runtimeUserName: config.userName,
+      ...summarizeAccountMaterial(material),
+    });
     await performLoginV2(password, material);
     authBootstrapDone = true;
     // eslint-disable-next-line no-console
@@ -968,7 +1059,6 @@ async function withBootstrapRetry<T>(fn: () => Promise<T>): Promise<T> {
         /\bstatus=16\b/i.test(message)
         || /\bstatus=9\b/i.test(message)
         || /invalid token/i.test(message)
-        || /failed to fetch/i.test(message)
         || /user (?:is|has) not (?:been )?initialized/i.test(message)
         || isPasswordBootstrapError(message)
       );
@@ -1014,10 +1104,19 @@ function authHint(error: unknown): Error {
  */
 export async function loadAccountFolderFromPicker(files: FileList | readonly File[]): Promise<void> {
   const material = await parseAccountFolder(files);
+  // eslint-disable-next-line no-console
+  console.info("[altastata] account folder parsed", summarizeAccountMaterial(material));
   setSessionAccountMaterial(material);
   updateRuntimeSettings({
     userName: material.myUser,
     accountId: material.displayName || material.myUser,
+  });
+  const updated = getRuntimeSettings();
+  // eslint-disable-next-line no-console
+  console.info("[altastata] account settings after folder parse", {
+    accountId: updated.accountId,
+    userName: updated.userName,
+    grpcBaseUrl: updated.grpcBaseUrl,
   });
 }
 
@@ -1052,16 +1151,9 @@ export async function bootstrapCurrentSettings(): Promise<void> {
  */
 export async function loginWithCurrentSettings(): Promise<void> {
   applyRuntimeSettings();
-  const material = getSessionAccountMaterial();
-  if (!material) {
-    throw new Error("Choose an account folder first, or use Sign in.");
-  }
-  const accountPassword = getRuntimeSettings().accountPassword ?? "";
-  if (accountLoginRequiresPassword(material.userProperties) && !accountPassword) {
-    throw new Error("Password is required.");
-  }
-  await performLoginV2(accountPassword, material);
-  authBootstrapDone = true;
+  // Reuse the guarded bootstrap path so concurrent callers (manual Sign in,
+  // event/watch bootstrap retry, listDir retry) collapse into a single LoginV2.
+  await ensureAuthBootstrap();
 }
 
 /**
@@ -1217,11 +1309,51 @@ export async function fetchPreviewBlob(
   version: string | null,
   mimeType: string | null,
 ): Promise<Blob> {
+  const { blob } = await fetchPreviewBlobCapped(path, version, mimeType, null);
+  return blob;
+}
+
+export interface CappedPreviewBlob {
+  blob: Blob;
+  bytesRead: number;
+  truncated: boolean;
+}
+
+function asUint8Array(raw: unknown): Uint8Array | null {
+  if (raw instanceof Uint8Array) {
+    return raw.length > 0 ? raw : null;
+  }
+  if (Array.isArray(raw)) {
+    const arr = new Uint8Array(raw as number[]);
+    return arr.length > 0 ? arr : null;
+  }
+  return null;
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === "AbortError")
+    || (error instanceof Error && /abort/i.test(error.message))
+  );
+}
+
+export async function fetchPreviewBlobCapped(
+  path: string,
+  version: string | null,
+  mimeType: string | null,
+  maxBytes: number | null,
+): Promise<CappedPreviewBlob> {
   try {
     await maybeBootstrap();
     const cloudPath = toCloudPath(path);
     const versionedPath = version ? `${cloudPath}✹${version}` : cloudPath;
-    const chunks = await withBootstrapRetry(() => grpcServerStream(
+    const normalizedMaxBytes = maxBytes != null && maxBytes > 0 ? maxBytes : null;
+    const controller = normalizedMaxBytes != null ? new AbortController() : null;
+    const bytesList: Uint8Array[] = [];
+    let total = 0;
+    let truncated = false;
+    try {
+      await withBootstrapRetry(() => grpcServerStreamWithCallback(
         "altastata.v1.FileOpsService/ReadStream",
         "ReadStreamRequest",
         {
@@ -1233,18 +1365,39 @@ export async function fetchPreviewBlob(
         },
         "ReadStreamChunk",
         true,
-    ));
-    const bytesList: Uint8Array[] = [];
-    let total = 0;
-    for (const chunk of chunks) {
-      const data = chunk.data;
-      if (data instanceof Uint8Array) {
-        bytesList.push(data);
-        total += data.length;
-      } else if (Array.isArray(data)) {
-        const arr = new Uint8Array(data as number[]);
-        bytesList.push(arr);
-        total += arr.length;
+        async (chunk) => {
+          const bytes = asUint8Array(chunk.data);
+          if (!bytes) return;
+          if (normalizedMaxBytes == null) {
+            bytesList.push(bytes);
+            total += bytes.length;
+            return;
+          }
+          const remaining = normalizedMaxBytes - total;
+          if (remaining <= 0) {
+            truncated = true;
+            controller?.abort();
+            return;
+          }
+          if (bytes.length > remaining) {
+            bytesList.push(bytes.slice(0, remaining));
+            total += remaining;
+            truncated = true;
+            controller?.abort();
+            return;
+          }
+          bytesList.push(bytes);
+          total += bytes.length;
+          if (total >= normalizedMaxBytes) {
+            truncated = true;
+            controller?.abort();
+          }
+        },
+        { signal: controller?.signal ?? undefined },
+      ));
+    } catch (error) {
+      if (!(truncated && isAbortError(error))) {
+        throw error;
       }
     }
     const merged = new Uint8Array(total);
@@ -1253,7 +1406,11 @@ export async function fetchPreviewBlob(
       merged.set(bytes, offset);
       offset += bytes.length;
     }
-    return new Blob([merged], { type: mimeType ?? "application/octet-stream" });
+    return {
+      blob: new Blob([merged], { type: mimeType ?? "application/octet-stream" }),
+      bytesRead: total,
+      truncated,
+    };
   } catch (error) {
     throw authHint(error);
   }
@@ -1360,26 +1517,180 @@ export async function fetchFilePreviewMetadata(
   }
 }
 
+async function uploadFileUnary(cloudPath: string, content: Uint8Array): Promise<void> {
+  const resp = await withBootstrapRetry(() => grpcUnary(
+    "altastata.v1.FileOpsService/CreateFile",
+    "CreateFileRequest",
+    { filePath: cloudPath, content },
+    "CreateFileResponse",
+    true,
+    UPLOAD_REQUEST_TIMEOUT_MS,
+  ));
+  const status = resp.status as { error?: string; operationState?: string } | undefined;
+  if (status?.error) {
+    throw new Error(status.error);
+  }
+}
+
 export async function uploadFile(targetPath: string, content: Uint8Array): Promise<void> {
   try {
     await maybeBootstrap();
     const cloudPath = toCloudPath(targetPath);
     // eslint-disable-next-line no-console
     console.info("[altastata] uploadFile", { targetPath, cloudPath, bytes: content.length });
-    const resp = await withBootstrapRetry(() => grpcUnary(
-        "altastata.v1.FileOpsService/CreateFile",
-        "CreateFileRequest",
-        { filePath: cloudPath, content },
-        "CreateFileResponse",
+    if (content.length <= UPLOAD_INLINE_MAX_BYTES) {
+      await uploadFileUnary(cloudPath, content);
+      return;
+    }
+    await uploadBytesChunked(cloudPath, content);
+  } catch (error) {
+    throw authHint(error);
+  }
+}
+
+export async function uploadBrowserFile(
+  targetPath: string,
+  file: File,
+  onProgress?: (uploadedBytes: number, totalBytes: number) => void,
+): Promise<void> {
+  try {
+    await maybeBootstrap();
+    const cloudPath = toCloudPath(targetPath);
+    // eslint-disable-next-line no-console
+    console.info("[altastata] uploadBrowserFile", {
+      targetPath,
+      cloudPath,
+      bytes: file.size,
+      name: file.name,
+    });
+    if (file.size <= UPLOAD_INLINE_MAX_BYTES) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await uploadFileUnary(cloudPath, bytes);
+      onProgress?.(file.size, file.size);
+      return;
+    }
+    await uploadFileChunked(cloudPath, file, onProgress);
+  } catch (error) {
+    throw authHint(error);
+  }
+}
+
+async function beginUpload(cloudPath: string, totalSize: number): Promise<{ uploadId: string; chunkSize: number }> {
+  const resp = await withBootstrapRetry(() => grpcUnary(
+    "altastata.v1.FileOpsService/BeginUpload",
+    "BeginUploadRequest",
+    { cloudPath, totalSize },
+    "BeginUploadResponse",
+    true,
+    REQUEST_TIMEOUT_MS,
+  ));
+  const uploadId = typeof resp.uploadId === "string" ? resp.uploadId.trim() : "";
+  const chunkSize = typeof resp.chunkSize === "number" && resp.chunkSize > 0
+    ? resp.chunkSize
+    : DEFAULT_UPLOAD_CHUNK_BYTES;
+  if (!uploadId) {
+    throw new Error("BeginUpload returned an empty upload_id");
+  }
+  return { uploadId, chunkSize };
+}
+
+async function abortUpload(uploadId: string): Promise<void> {
+  await withBootstrapRetry(() => grpcUnary(
+    "altastata.v1.FileOpsService/AbortUpload",
+    "AbortUploadRequest",
+    { uploadId },
+    "AbortUploadResponse",
+    true,
+    REQUEST_TIMEOUT_MS,
+  ));
+}
+
+async function uploadBytesChunked(cloudPath: string, content: Uint8Array): Promise<void> {
+  const { uploadId, chunkSize } = await beginUpload(cloudPath, content.length);
+  let completed = false;
+  try {
+    let offset = 0;
+    while (offset < content.length) {
+      const end = Math.min(offset + chunkSize, content.length);
+      const chunk = content.slice(offset, end);
+      await withBootstrapRetry(() => grpcUnary(
+        "altastata.v1.FileOpsService/UploadChunk",
+        "UploadChunkRequest",
+        { uploadId, offset, data: chunk },
+        "UploadChunkResponse",
         true,
-        UPLOAD_REQUEST_TIMEOUT_MS,
+        UPLOAD_CHUNK_TIMEOUT_MS,
+      ));
+      offset = end;
+    }
+    const completeResp = await withBootstrapRetry(() => grpcUnary(
+      "altastata.v1.FileOpsService/CompleteUpload",
+      "CompleteUploadRequest",
+      { uploadId },
+      "CompleteUploadResponse",
+      true,
+      REQUEST_TIMEOUT_MS,
     ));
-    const status = resp.status as { error?: string; operationState?: string } | undefined;
+    const status = completeResp.status as { error?: string } | undefined;
     if (status?.error) {
       throw new Error(status.error);
     }
-  } catch (error) {
-    throw authHint(error);
+    completed = true;
+  } finally {
+    if (!completed) {
+      try {
+        await abortUpload(uploadId);
+      } catch {
+        // Best-effort abort; the server-side TTL reaper is the safety net.
+      }
+    }
+  }
+}
+
+async function uploadFileChunked(
+  cloudPath: string,
+  file: File,
+  onProgress?: (uploadedBytes: number, totalBytes: number) => void,
+): Promise<void> {
+  const { uploadId, chunkSize } = await beginUpload(cloudPath, file.size);
+  let completed = false;
+  try {
+    let offset = 0;
+    while (offset < file.size) {
+      const end = Math.min(offset + chunkSize, file.size);
+      const bytes = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+      await withBootstrapRetry(() => grpcUnary(
+        "altastata.v1.FileOpsService/UploadChunk",
+        "UploadChunkRequest",
+        { uploadId, offset, data: bytes },
+        "UploadChunkResponse",
+        true,
+        UPLOAD_CHUNK_TIMEOUT_MS,
+      ));
+      offset = end;
+      onProgress?.(offset, file.size);
+    }
+    const completeResp = await withBootstrapRetry(() => grpcUnary(
+      "altastata.v1.FileOpsService/CompleteUpload",
+      "CompleteUploadRequest",
+      { uploadId },
+      "CompleteUploadResponse",
+      true,
+      REQUEST_TIMEOUT_MS,
+    ));
+    const status = completeResp.status as { error?: string } | undefined;
+    if (status?.error) {
+      throw new Error(status.error);
+    }
+    completed = true;
+  } finally {
+    if (!completed) {
+      try {
+        await abortUpload(uploadId);
+      } catch {
+        // Best-effort abort; the server-side TTL reaper is the safety net.
+      }
+    }
   }
 }
 
@@ -1630,6 +1941,61 @@ export async function downloadFile(path: string, version: string | null): Promis
   // eslint-disable-next-line no-console
   console.info("[altastata] downloadFile", { path, version });
   return fetchPreviewBlob(path, version, null);
+}
+
+export interface StreamFileDownloadOptions {
+  idleTimeoutMs?: number;
+  signal?: AbortSignal;
+  onProgress?: (downloadedBytes: number) => void;
+}
+
+export async function streamFileDownload(
+  path: string,
+  version: string | null,
+  onChunk: (chunk: Uint8Array) => void | Promise<void>,
+  options: StreamFileDownloadOptions = {},
+): Promise<void> {
+  try {
+    await maybeBootstrap();
+    const cloudPath = toCloudPath(path);
+    const versionedPath = version ? `${cloudPath}✹${version}` : cloudPath;
+    // eslint-disable-next-line no-console
+    console.info("[altastata] streamFileDownload", { path, version, cloudPath: versionedPath });
+    let downloaded = 0;
+    await grpcServerStreamWithCallback(
+      "altastata.v1.FileOpsService/ReadStream",
+      "ReadStreamRequest",
+      {
+        filePath: versionedPath,
+        snapshotTime: 0,
+        startPosition: 0,
+        parallelChunks: 4,
+        chunkSize: FILE_DOWNLOAD_CHUNK_BYTES,
+      },
+      "ReadStreamChunk",
+      true,
+      async (msg) => {
+        const data = msg.data;
+        let chunk: Uint8Array | null = null;
+        if (data instanceof Uint8Array) {
+          if (data.length > 0) chunk = data;
+        } else if (Array.isArray(data)) {
+          const arr = new Uint8Array(data as number[]);
+          if (arr.length > 0) chunk = arr;
+        }
+        if (!chunk) return;
+        await onChunk(chunk);
+        downloaded += chunk.length;
+        options.onProgress?.(downloaded);
+      },
+      {
+        idleTimeoutMs: options.idleTimeoutMs ?? FILE_DOWNLOAD_IDLE_TIMEOUT_MS,
+        signal: options.signal,
+      },
+    );
+  } catch (error) {
+    throw authHint(error);
+  }
 }
 
 const ZIP_STREAM_IDLE_TIMEOUT_MS = 60_000;
