@@ -127,6 +127,7 @@ message ReadStreamRequest {
   int64 start_position = 3;
   int32 parallel_chunks = 4;
   int32 chunk_size = 5;
+  bool trust_cached_size = 6;
 }
 message ReadStreamChunk { bytes data = 1; }
 message DownloadDirectoryAsZipRequest {
@@ -225,7 +226,7 @@ const DELETE_REQUEST_TIMEOUT_MS = 300_000;
 const LIST_DIR_FAST_TIMEOUT_MS = 5_000;
 /** Large-file ReadStream: allow slow disk writes between chunks without aborting. */
 const FILE_DOWNLOAD_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
-const FILE_DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+const FILE_DOWNLOAD_CHUNK_BYTES = 1024 * 1024;
 
 function T(name: string): Type {
   const cached = typeCache.get(name);
@@ -589,7 +590,13 @@ async function grpcServerStreamWithCallback(
   respTypeName: string,
   withAuth: boolean,
   onMessage: (msg: Record<string, unknown>) => void | Promise<void>,
-  options: { idleTimeoutMs?: number; signal?: AbortSignal } = {},
+  options: {
+    idleTimeoutMs?: number;
+    signal?: AbortSignal;
+    onStreamOpen?: () => void;
+    /** When true, keep reading the HTTP body while handlers run (avoids HTTP/2 stalls on slow writes). */
+    pipeline?: boolean;
+  } = {},
 ): Promise<void> {
   const idleTimeoutMs = options.idleTimeoutMs ?? REQUEST_TIMEOUT_MS;
   const reqType = T(reqTypeName);
@@ -619,11 +626,25 @@ async function grpcServerStreamWithCallback(
   if (!response.body) {
     throw new Error("Missing response body for gRPC stream");
   }
+  options.onStreamOpen?.();
 
   const reader = response.body.getReader();
   let stash: Bytes = new Uint8Array(0);
   let trailers = new Map<string, string>();
   let sawTrailerFrame = false;
+  const pendingHandlers = new Set<Promise<void>>();
+  let pipelineError: unknown;
+
+  const dispatchMessage = (obj: Record<string, unknown>) => {
+    if (!options.pipeline) {
+      return onMessage(obj);
+    }
+    const job = Promise.resolve(onMessage(obj)).catch((err) => {
+      pipelineError ??= err;
+    });
+    pendingHandlers.add(job);
+    void job.finally(() => pendingHandlers.delete(job));
+  };
 
   let done = false;
   while (!done) {
@@ -651,9 +672,16 @@ async function grpcServerStreamWithCallback(
           objects: true,
           defaults: false,
         }) as Record<string, unknown>;
-        await onMessage(obj);
+        await dispatchMessage(obj);
       }
     }
+  }
+
+  if (pendingHandlers.size > 0) {
+    await Promise.all([...pendingHandlers]);
+  }
+  if (pipelineError) {
+    throw pipelineError;
   }
 
   if (!sawTrailerFrame) {
@@ -1947,6 +1975,8 @@ export interface StreamFileDownloadOptions {
   idleTimeoutMs?: number;
   signal?: AbortSignal;
   onProgress?: (downloadedBytes: number) => void;
+  /** Fires once the HTTP stream is open (before the first payload chunk). */
+  onStreamOpen?: () => void;
 }
 
 export async function streamFileDownload(
@@ -1962,7 +1992,9 @@ export async function streamFileDownload(
     // eslint-disable-next-line no-console
     console.info("[altastata] streamFileDownload", { path, version, cloudPath: versionedPath });
     let downloaded = 0;
-    await grpcServerStreamWithCallback(
+    options.onProgress?.(0);
+    let writeChain: Promise<void> = Promise.resolve();
+    await withBootstrapRetry(() => grpcServerStreamWithCallback(
       "altastata.v1.FileOpsService/ReadStream",
       "ReadStreamRequest",
       {
@@ -1971,10 +2003,11 @@ export async function streamFileDownload(
         startPosition: 0,
         parallelChunks: 4,
         chunkSize: FILE_DOWNLOAD_CHUNK_BYTES,
+        trustCachedSize: version != null && version.length > 0,
       },
       "ReadStreamChunk",
       true,
-      async (msg) => {
+      (msg) => {
         const data = msg.data;
         let chunk: Uint8Array | null = null;
         if (data instanceof Uint8Array) {
@@ -1984,15 +2017,20 @@ export async function streamFileDownload(
           if (arr.length > 0) chunk = arr;
         }
         if (!chunk) return;
-        await onChunk(chunk);
-        downloaded += chunk.length;
-        options.onProgress?.(downloaded);
+        writeChain = writeChain.then(async () => {
+          await onChunk(chunk as Uint8Array);
+          downloaded += (chunk as Uint8Array).length;
+          options.onProgress?.(downloaded);
+        });
       },
       {
         idleTimeoutMs: options.idleTimeoutMs ?? FILE_DOWNLOAD_IDLE_TIMEOUT_MS,
         signal: options.signal,
+        onStreamOpen: options.onStreamOpen,
+        pipeline: true,
       },
-    );
+    ));
+    await writeChain;
   } catch (error) {
     throw authHint(error);
   }
@@ -2015,26 +2053,32 @@ export async function streamDirectoryZip(
     const cloudPath = toCloudPath(path);
     // eslint-disable-next-line no-console
     console.info("[altastata] streamDirectoryZip", { path, cloudPath });
+    let writeChain: Promise<void> = Promise.resolve();
     await withBootstrapRetry(() => grpcServerStreamWithCallback(
       "altastata.v1.FileOpsService/DownloadDirectoryAsZip",
       "DownloadDirectoryAsZipRequest",
       { cloudPathPrefix: cloudPath },
       "DownloadDirectoryAsZipChunk",
       true,
-      async (msg) => {
+      (msg) => {
         const data = msg.data;
+        let chunk: Uint8Array | null = null;
         if (data instanceof Uint8Array) {
-          if (data.length > 0) await onChunk(data);
+          if (data.length > 0) chunk = data;
         } else if (Array.isArray(data)) {
           const arr = new Uint8Array(data as number[]);
-          if (arr.length > 0) await onChunk(arr);
+          if (arr.length > 0) chunk = arr;
         }
+        if (!chunk) return;
+        writeChain = writeChain.then(() => onChunk(chunk as Uint8Array));
       },
       {
         idleTimeoutMs: options.idleTimeoutMs ?? ZIP_STREAM_IDLE_TIMEOUT_MS,
         signal: options.signal,
+        pipeline: true,
       },
     ));
+    await writeChain;
   } catch (error) {
     throw authHint(error);
   }

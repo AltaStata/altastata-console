@@ -56,12 +56,17 @@ The frontend currently mirrors JavaFX behavior:
 | Behavior | Current implementation |
 |---|---|
 | Miller columns (one level per click) | `ListVersions` with `includingSubdirectories=false` |
-| Text preview (large files) | `GetBuffer` first chunk only (`size` limited) |
+| Small file upload (≤ 32 MiB) | `CreateFile` unary |
+| Large file upload | `BeginUpload` / `UploadChunk` / `CompleteUpload` via `uploadBrowserFile()` |
+| Large file download (Save Picker) | `ReadStream` → `streamFileDownload()` into `WritableStream` with progress |
+| Inline preview (image/PDF) | `fetchPreviewBlobCapped()` — reads at most 16 MiB from `ReadStream` |
+| Video/audio preview | same cap; 10 s timeout → “use Download” notice (no full-file fetch) |
+| Text preview | `GetBuffer` first 4 KiB only |
 | CSV preview | treated as text (`text/csv`) |
-| Preview metadata | `GetAttributes` (`size`, `readers`) + version tag parsing |
-| User derivation | `myuser` from user properties (JavaFX-compatible) |
-| Live updates on `SHARE` / `DELETE` | `EventsService.Watch` server stream (typed `Event` payloads, `since_sequence` replay) + ~7s follow-up `listDir` to absorb backend's "Finishing shot" lag |
-| Self-healing auth | `withBootstrapRetry` — on `status=16`/`status=9`/"User is not initialized" the client transparently re-runs the bootstrap sequence and retries the call once |
+| Account switch (same `myUser`) | `LoginV2` reinstalls live FS when `user_properties` change (no gateway restart) |
+| User derivation | `myuser` from account folder `*user.properties` |
+| Live updates on `SHARE` / `DELETE` | `EventsService.Watch` + ~7s follow-up `listDir` |
+| Self-healing auth | `withBootstrapRetry` on token/init errors; concurrent login deduped via `ensureAuthBootstrap` |
 
 ## Runtime settings and secrets
 

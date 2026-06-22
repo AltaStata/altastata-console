@@ -30,6 +30,7 @@ import { zip } from "fflate";
 import {
   deletePath,
   downloadFile,
+  fetchFilePreviewMetadata,
   listKnownUsers,
   makeUniqueArchiveName,
   resolveUploadTargetPath,
@@ -97,6 +98,9 @@ export default function BottomToolbar({
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+  /** Download UI phase before the first payload byte (preparing → waiting → active). */
+  const downloadWaitPhaseRef = useRef<"preparing" | "waiting">("preparing");
+  const downloadAbortRef = useRef<AbortController | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string>("Ready");
   /** 0–100 when byte progress is known; null = indeterminate spinner bar. */
@@ -188,10 +192,20 @@ export default function BottomToolbar({
       setTransferPercent(Math.min(100, (transferred / total) * 100));
       const cap = Math.min(transferred, total).toLocaleString("en-US");
       const all = total.toLocaleString("en-US");
-      setStatus(`${label} (${cap}/${all} bytes)...`);
+      const waitHint = transferred === 0 && label === "Downloading"
+        ? (downloadWaitPhaseRef.current === "waiting" ? ", waiting for data" : ", preparing")
+        : transferred === 0 ? ", preparing" : "";
+      setStatus(`${label} (${cap}/${all} bytes${waitHint})...`);
       return;
     }
     setTransferPercent(null);
+    if (transferred === 0) {
+      const waitHint = label === "Downloading" && downloadWaitPhaseRef.current === "waiting"
+        ? "waiting for data"
+        : "preparing";
+      setStatus(`${label} (${waitHint})...`);
+      return;
+    }
     setStatus(`${label} (${transferred.toLocaleString("en-US")} bytes)...`);
   };
 
@@ -205,7 +219,7 @@ export default function BottomToolbar({
     if (!file) return;
     const targetPath = resolveUploadTargetPath(file.name, uploadAnchor, activePath);
     await runAction("Upload", async () => {
-      setStatus("Uploading (starting...)");
+      reportByteProgress(0, file.size, "Uploading");
       await uploadBrowserFile(targetPath, file, (uploaded, total) => {
         reportByteProgress(uploaded, total, "Uploading");
       });
@@ -275,17 +289,28 @@ export default function BottomToolbar({
     reportByteProgress(downloaded, total, "Downloading");
   };
 
+  const markDownloadWaiting = (total: number | null | undefined) => {
+    downloadWaitPhaseRef.current = "waiting";
+    reportDownloadProgress(0, total);
+  };
+
   const streamFileToHandle = async (
     handle: SaveFileHandle,
     path: string,
     version: string | null,
+    totalBytes: number | null | undefined,
     onProgress?: (downloadedBytes: number) => void,
+    signal?: AbortSignal,
   ) => {
+    markDownloadWaiting(totalBytes);
     const writable = await handle.createWritable();
     try {
       await streamFileDownload(path, version, async (chunk) => {
         await writable.write(chunk);
-      }, { onProgress });
+      }, {
+        onProgress,
+        signal,
+      });
       await writable.close();
     } catch (error) {
       try {
@@ -361,11 +386,25 @@ export default function BottomToolbar({
       return;
     }
 
-    const totalBytes = entry.is_dir ? null : entry.size;
+    let totalBytes = entry.is_dir ? null : entry.size;
+    downloadAbortRef.current?.abort();
+    const downloadAbort = new AbortController();
+    downloadAbortRef.current = downloadAbort;
     setBusy(true);
-    setTransferPercent(null);
-    setStatus("Downloading (starting...)");
+    downloadWaitPhaseRef.current = "preparing";
+    reportDownloadProgress(0, totalBytes);
     try {
+      if (!entry.is_dir && (totalBytes == null || totalBytes <= 0)) {
+        try {
+          const meta = await fetchFilePreviewMetadata(entry.path, entry.version);
+          if (meta.size != null && meta.size > 0) {
+            totalBytes = meta.size;
+            reportDownloadProgress(0, totalBytes);
+          }
+        } catch {
+          // Keep indeterminate progress when size is unavailable.
+        }
+      }
       if (entry.is_dir) {
         await streamZipToHandle(saveHandle as SaveFileHandle, entry.path);
       } else {
@@ -373,7 +412,9 @@ export default function BottomToolbar({
           saveHandle as SaveFileHandle,
           entry.path,
           entry.version,
+          totalBytes,
           (downloaded) => reportDownloadProgress(downloaded, totalBytes),
+          downloadAbort.signal,
         );
       }
       setStatus("Download done");
