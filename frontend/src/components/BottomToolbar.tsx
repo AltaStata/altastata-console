@@ -46,6 +46,7 @@ import {
 
 const FOLDER_UPLOAD_CONCURRENCY_DEFAULT = 4;
 const FOLDER_UPLOAD_CONCURRENCY_MAX_SMALL_FILES = 12;
+const ZIP_WRITE_BACKPRESSURE_BYTES = 8 * 1024 * 1024;
 import type { FileEntry } from "@/types";
 import type { DeletingTarget } from "@/utils/deletingTargets";
 
@@ -65,6 +66,7 @@ interface Props {
    * the FULL absolute path (e.g. `/foo/new-dir`).
    */
   onAddPendingFolder?: (fullPath: string) => void;
+  onRemovePendingFolders?: (fullPaths: string[]) => void;
   onMarkPathsDeleting?: (targets: DeletingTarget[]) => void;
   onUnmarkPathsDeleting?: (targets: DeletingTarget[]) => void;
   onRefresh: () => void;
@@ -106,6 +108,7 @@ export default function BottomToolbar({
   activePath,
   pendingFolderPaths,
   onAddPendingFolder,
+  onRemovePendingFolders,
   onMarkPathsDeleting,
   onUnmarkPathsDeleting,
   onRefresh,
@@ -183,14 +186,21 @@ export default function BottomToolbar({
     return FOLDER_UPLOAD_CONCURRENCY_DEFAULT;
   };
 
-  const enqueuePendingFoldersForTargetPath = (targetPath: string) => {
+  const enqueuePendingFoldersForTargetPath = (
+    targetPath: string,
+    existing: ReadonlySet<string>,
+    addedNow: Set<string>,
+  ) => {
     if (!onAddPendingFolder) return;
     const normalized = targetPath.trim().replace(/\/+/g, "/");
     const lastSlash = normalized.lastIndexOf("/");
     if (lastSlash <= 0) return;
     let parent = normalized.slice(0, lastSlash);
     while (parent && parent !== "/") {
-      onAddPendingFolder(parent);
+      if (!existing.has(parent) && !addedNow.has(parent)) {
+        onAddPendingFolder(parent);
+        addedNow.add(parent);
+      }
       const idx = parent.lastIndexOf("/");
       parent = idx <= 0 ? "/" : parent.slice(0, idx);
     }
@@ -274,13 +284,15 @@ export default function BottomToolbar({
     const folderUploadConcurrency = chooseFolderUploadConcurrency(files);
     setBusy(true);
     let completed = 0;
+    const addedPendingFolders = new Set<string>();
+    const existingPendingFolders = new Set(pendingFolderPaths ?? []);
     setStatus(`Uploading folder (0/${files.length}, ×${folderUploadConcurrency})...`);
     try {
       // Show the folder tree immediately while files are still uploading.
       for (const file of files) {
         const relativePath = file.webkitRelativePath || file.name;
         const targetPath = resolveUploadTargetPath(relativePath, uploadAnchor, activePath);
-        enqueuePendingFoldersForTargetPath(targetPath);
+        enqueuePendingFoldersForTargetPath(targetPath, existingPendingFolders, addedPendingFolders);
       }
 
       await runWithConcurrency(files, folderUploadConcurrency, async (file) => {
@@ -293,6 +305,9 @@ export default function BottomToolbar({
       setStatus(`Folder upload done (${completed}/${files.length})`);
       onRefresh();
     } catch (error) {
+      if (addedPendingFolders.size > 0) {
+        onRemovePendingFolders?.([...addedPendingFolders]);
+      }
       const detail = error instanceof Error ? error.message : String(error);
       setStatus(`Folder upload failed after ${completed}/${files.length}: ${detail}`);
     } finally {
@@ -493,10 +508,12 @@ export default function BottomToolbar({
     const writable = await handle.createWritable();
     let settled = false;
     let totalZipBytes = 0;
+    let pendingWriteBytes = 0;
     let lastProgressAt = 0;
     const totalEntries = entries.length;
     let processedEntries = 0;
     let writeChain: Promise<void> = Promise.resolve();
+    let writeError: unknown = null;
 
     const rejectOnce = (reject: (reason?: unknown) => void, reason: unknown) => {
       if (settled) return;
@@ -513,10 +530,13 @@ export default function BottomToolbar({
           }
           if (settled) return;
           if (data.length > 0) {
+            const writeData = data.slice();
+            pendingWriteBytes += writeData.length;
             writeChain = writeChain
               .then(async () => {
-                await writable.write(data);
-                totalZipBytes += data.length;
+                await writable.write(writeData);
+                totalZipBytes += writeData.length;
+                pendingWriteBytes -= writeData.length;
                 const now = Date.now();
                 if (now - lastProgressAt >= 250) {
                   setStatus(
@@ -527,6 +547,8 @@ export default function BottomToolbar({
                 }
               })
               .catch((error) => {
+                writeError = error;
+                pendingWriteBytes = 0;
                 rejectOnce(reject, error);
               });
           }
@@ -545,6 +567,13 @@ export default function BottomToolbar({
 
         void (async () => {
           try {
+            const maybeDrainWrites = async () => {
+              if (writeError) throw writeError;
+              if (pendingWriteBytes >= ZIP_WRITE_BACKPRESSURE_BYTES) {
+                await writeChain;
+              }
+              if (writeError) throw writeError;
+            };
             const used = new Set<string>();
             for (let i = 0; i < entries.length; i += 1) {
               const entry = entries[i];
@@ -554,15 +583,18 @@ export default function BottomToolbar({
               const zipEntry = new ZipPassThrough(uniqueName);
               zipper.add(zipEntry);
               if (entry.is_dir) {
-                await streamDirectoryZip(entry.path, (chunk) => {
+                await streamDirectoryZip(entry.path, async (chunk) => {
                   zipEntry.push(chunk, false);
+                  await maybeDrainWrites();
                 });
               } else {
-                await streamFileDownload(entry.path, entry.version, (chunk) => {
+                await streamFileDownload(entry.path, entry.version, async (chunk) => {
                   zipEntry.push(chunk, false);
+                  await maybeDrainWrites();
                 });
               }
               zipEntry.push(new Uint8Array(0), true);
+              await maybeDrainWrites();
               processedEntries += 1;
               setStatus(`Preparing ZIP (${processedEntries}/${totalEntries})...`);
             }

@@ -1412,7 +1412,9 @@ export async function uploadFile(targetPath: string, content: Uint8Array): Promi
 function resolveUploadChunkSize(serverChunkSize: unknown): number {
   const n = typeof serverChunkSize === "number" ? serverChunkSize : Number(serverChunkSize);
   if (!Number.isFinite(n) || n <= 0) return STREAM_UPLOAD_CHUNK_FALLBACK_BYTES;
-  return Math.max(256 * 1024, Math.min(16 * 1024 * 1024, Math.floor(n)));
+  const normalized = Math.floor(n);
+  if (normalized <= 0) return STREAM_UPLOAD_CHUNK_FALLBACK_BYTES;
+  return Math.min(16 * 1024 * 1024, normalized);
 }
 
 /**

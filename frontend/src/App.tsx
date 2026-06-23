@@ -95,6 +95,18 @@ export default function App() {
     });
   }, []);
 
+  const removePendingFolders = useCallback((fullPaths: string[]) => {
+    if (fullPaths.length === 0) return;
+    setPendingFolderPaths((prev) => {
+      let mutated = false;
+      const next = new Set(prev);
+      for (const path of fullPaths) {
+        if (next.delete(path)) mutated = true;
+      }
+      return mutated ? next : prev;
+    });
+  }, []);
+
   const markPathsDeleting = useCallback((targets: DeletingTarget[]) => {
     setDeletingTargets((prev) => mergeDeletingTargets(prev, targets));
   }, []);
@@ -362,6 +374,7 @@ export default function App() {
         activePath={activePath}
         pendingFolderPaths={pendingFolderPaths}
         onAddPendingFolder={addPendingFolder}
+        onRemovePendingFolders={removePendingFolders}
         onMarkPathsDeleting={markPathsDeleting}
         onUnmarkPathsDeleting={unmarkPathsDeleting}
         onRefresh={handleRefresh}
