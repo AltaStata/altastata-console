@@ -133,6 +133,30 @@ message DownloadDirectoryAsZipRequest {
   string cloud_path_prefix = 1;
 }
 message DownloadDirectoryAsZipChunk { bytes data = 1; }
+message BeginUploadRequest {
+  string cloud_path = 1;
+  int64 total_size = 2;
+}
+message BeginUploadResponse {
+  string upload_id = 1;
+  int32 chunk_size = 2;
+}
+message UploadChunkRequest {
+  string upload_id = 1;
+  int64 offset = 2;
+  bytes data = 3;
+}
+message UploadChunkResponse {
+  int64 bytes_received = 1;
+}
+message CompleteUploadRequest {
+  string upload_id = 1;
+}
+message CompleteUploadResponse { FileStatus status = 1; }
+message AbortUploadRequest {
+  string upload_id = 1;
+}
+message AbortUploadResponse { bool aborted = 1; }
 message WatchRequest {
   uint64 since_sequence = 1;
 }
@@ -193,6 +217,8 @@ const typeCache = new Map<string, Type>();
 const REQUEST_TIMEOUT_MS = 15_000;
 /** CreateFile waits on encrypted cloud I/O; under bulk folder upload (×4 concurrency) 15s is too short. */
 const UPLOAD_REQUEST_TIMEOUT_MS = 120_000;
+const STREAM_UPLOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
+const STREAM_UPLOAD_CHUNK_FALLBACK_BYTES = 8 * 1024 * 1024;
 /** Delete with includingSubdirectories walks encrypted metadata; large trees need minutes, not seconds. */
 const DELETE_REQUEST_TIMEOUT_MS = 300_000;
 const LIST_DIR_FAST_TIMEOUT_MS = 5_000;
@@ -1383,6 +1409,96 @@ export async function uploadFile(targetPath: string, content: Uint8Array): Promi
   }
 }
 
+function resolveUploadChunkSize(serverChunkSize: unknown): number {
+  const n = typeof serverChunkSize === "number" ? serverChunkSize : Number(serverChunkSize);
+  if (!Number.isFinite(n) || n <= 0) return STREAM_UPLOAD_CHUNK_FALLBACK_BYTES;
+  return Math.max(256 * 1024, Math.min(16 * 1024 * 1024, Math.floor(n)));
+}
+
+/**
+ * Browser-friendly upload that avoids reading the whole file into memory.
+ * Small files keep the single-RPC CreateFile fast path; large files stream
+ * through BeginUpload/UploadChunk/CompleteUpload with bounded chunk buffers.
+ */
+export async function uploadBrowserFile(
+  targetPath: string,
+  file: File,
+  onProgress?: (bytesSent: number, totalBytes: number) => void,
+): Promise<void> {
+  const totalBytes = file.size || 0;
+  onProgress?.(0, totalBytes);
+  if (totalBytes <= STREAM_UPLOAD_THRESHOLD_BYTES) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    await uploadFile(targetPath, bytes);
+    onProgress?.(bytes.length, totalBytes);
+    return;
+  }
+
+  await maybeBootstrap();
+  const cloudPath = toCloudPath(targetPath);
+  let uploadId = "";
+  try {
+    const begin = await withBootstrapRetry(() => grpcUnary(
+      "altastata.v1.FileOpsService/BeginUpload",
+      "BeginUploadRequest",
+      { cloudPath, totalSize: totalBytes },
+      "BeginUploadResponse",
+      true,
+      UPLOAD_REQUEST_TIMEOUT_MS,
+    ));
+    uploadId = typeof begin.uploadId === "string" ? begin.uploadId : "";
+    if (!uploadId) {
+      throw new Error("BeginUpload response missing upload_id");
+    }
+    const chunkSize = resolveUploadChunkSize(begin.chunkSize);
+
+    let offset = 0;
+    while (offset < totalBytes) {
+      const end = Math.min(offset + chunkSize, totalBytes);
+      const chunk = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+      await withBootstrapRetry(() => grpcUnary(
+        "altastata.v1.FileOpsService/UploadChunk",
+        "UploadChunkRequest",
+        { uploadId, offset, data: chunk },
+        "UploadChunkResponse",
+        true,
+        UPLOAD_REQUEST_TIMEOUT_MS,
+      ));
+      offset = end;
+      onProgress?.(offset, totalBytes);
+    }
+
+    const complete = await withBootstrapRetry(() => grpcUnary(
+      "altastata.v1.FileOpsService/CompleteUpload",
+      "CompleteUploadRequest",
+      { uploadId },
+      "CompleteUploadResponse",
+      true,
+      UPLOAD_REQUEST_TIMEOUT_MS,
+    ));
+    const status = complete.status as { error?: string } | undefined;
+    if (status?.error) {
+      throw new Error(status.error);
+    }
+  } catch (error) {
+    if (uploadId) {
+      try {
+        await grpcUnary(
+          "altastata.v1.FileOpsService/AbortUpload",
+          "AbortUploadRequest",
+          { uploadId },
+          "AbortUploadResponse",
+          true,
+          UPLOAD_REQUEST_TIMEOUT_MS,
+        );
+      } catch {
+        // Best effort cleanup; report original failure.
+      }
+    }
+    throw authHint(error);
+  }
+}
+
 export async function deletePath(path: string): Promise<void> {
   try {
     await maybeBootstrap();
@@ -1654,6 +1770,47 @@ export async function streamDirectoryZip(
       "DownloadDirectoryAsZipRequest",
       { cloudPathPrefix: cloudPath },
       "DownloadDirectoryAsZipChunk",
+      true,
+      async (msg) => {
+        const data = msg.data;
+        if (data instanceof Uint8Array) {
+          if (data.length > 0) await onChunk(data);
+        } else if (Array.isArray(data)) {
+          const arr = new Uint8Array(data as number[]);
+          if (arr.length > 0) await onChunk(arr);
+        }
+      },
+      {
+        idleTimeoutMs: options.idleTimeoutMs ?? ZIP_STREAM_IDLE_TIMEOUT_MS,
+        signal: options.signal,
+      },
+    ));
+  } catch (error) {
+    throw authHint(error);
+  }
+}
+
+export async function streamFileDownload(
+  path: string,
+  version: string | null,
+  onChunk: (chunk: Uint8Array) => void | Promise<void>,
+  options: StreamDirectoryZipOptions = {},
+): Promise<void> {
+  try {
+    await maybeBootstrap();
+    const cloudPath = toCloudPath(path);
+    const versionedPath = version ? `${cloudPath}✹${version}` : cloudPath;
+    await withBootstrapRetry(() => grpcServerStreamWithCallback(
+      "altastata.v1.FileOpsService/ReadStream",
+      "ReadStreamRequest",
+      {
+        filePath: versionedPath,
+        snapshotTime: 0,
+        startPosition: 0,
+        parallelChunks: 4,
+        chunkSize: 256 * 1024,
+      },
+      "ReadStreamChunk",
       true,
       async (msg) => {
         const data = msg.data;

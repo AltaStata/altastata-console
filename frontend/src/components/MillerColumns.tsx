@@ -1,10 +1,10 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { Box, Button, Stack, Typography } from "@mui/material";
 import SettingsIcon from "@mui/icons-material/Settings";
 import { isUserNotInitializedError, listDir } from "@/api/altastata";
 import type { FileEntry } from "@/types";
-import type { DeletingTarget } from "@/utils/deletingTargets";
+import { type DeletingTarget } from "@/utils/deletingTargets";
 import FileColumn from "./FileColumn";
 import PreviewPane from "./PreviewPane";
 
@@ -136,6 +136,11 @@ export default function MillerColumns({
     if (additions.length === 0) return column;
     return { ...column, entries: sortEntries([...column.entries, ...additions]) };
   }, [pendingChildrenOf, sortEntries]);
+
+  const displayColumns = useMemo(
+    () => columns.map((col) => mergePendingFolders(col)),
+    [columns, mergePendingFolders],
+  );
 
   const loadColumn = useCallback(async (path: string): Promise<ColumnState> => {
     const data = await listDir(path);
@@ -450,12 +455,12 @@ export default function MillerColumns({
           autoSaveId="altastata-console-miller"
           dir="ltr"
         >
-          {columns.map((col, idx) => (
+          {displayColumns.map((col, idx) => (
             <Fragment key={`${idx}-${col.path}`}>
               <Panel
                 id={`miller-col-${col.path}`}
                 order={idx}
-                defaultSize={getColumnDefaultSize(columns.length)}
+                defaultSize={getColumnDefaultSize(displayColumns.length)}
                 minSize={12}
               >
                 <FileColumn
@@ -479,7 +484,7 @@ export default function MillerColumns({
           ))}
           <Panel
             id="miller-preview"
-            order={columns.length}
+            order={displayColumns.length}
             defaultSize={38}
             minSize={20}
           >
