@@ -30,7 +30,6 @@ import {
   getAccount,
   hasSessionAccountMaterial,
   loadAccountFolderFromPicker,
-  loginWithCurrentSettings,
   subscribeToAltaStataEvents,
 } from "@/api/altastata";
 import { getSessionAccountMaterial } from "@/session/accountMaterial";
@@ -248,21 +247,6 @@ export default function App() {
     return saved;
   };
 
-  const handleSave = async () => {
-    setSettingsBusy(true);
-    setSettingsError(null);
-    setSettingsStatus(null);
-    try {
-      const saved = await persistAndRefresh();
-      setSettingsDraft(saved);
-      setSettingsStatus("Settings saved.");
-    } catch (e) {
-      setSettingsError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSettingsBusy(false);
-    }
-  };
-
   const handleSaveAndSignIn = async () => {
     setSettingsBusy(true);
     setSettingsError(null);
@@ -274,24 +258,6 @@ export default function App() {
         throw new Error("Choose an account folder before signing in.");
       }
       await bootstrapCurrentSettings();
-      setSettingsStatus("Signed in.");
-      handleRefresh();
-    } catch (e) {
-      setSettingsError(e instanceof Error ? e.message : String(e));
-      setSettingsStatus(null);
-    } finally {
-      setSettingsBusy(false);
-    }
-  };
-
-  const handleReSignIn = async () => {
-    setSettingsBusy(true);
-    setSettingsError(null);
-    setSettingsStatus("Re-signing in...");
-    try {
-      const saved = await persistAndRefresh();
-      setSettingsDraft(saved);
-      await loginWithCurrentSettings();
       setSettingsStatus("Signed in.");
       handleRefresh();
     } catch (e) {
@@ -500,14 +466,6 @@ export default function App() {
         </DialogContent>
         <DialogActions>
           <Button onClick={closeSettings} disabled={settingsBusy}>Close</Button>
-          <Button onClick={() => void handleSave()} disabled={settingsBusy} variant="outlined">Save</Button>
-          <Button
-            onClick={() => void handleReSignIn()}
-            disabled={settingsBusy || !hasSessionAccountMaterial()}
-            variant="outlined"
-          >
-            Re-sign in
-          </Button>
           <Button onClick={() => void handleSaveAndSignIn()} disabled={settingsBusy} variant="contained">
             Sign in
           </Button>

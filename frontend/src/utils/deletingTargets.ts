@@ -54,3 +54,13 @@ export function isRecursiveDeleteRoot(entry: FileEntry, targets: DeletingTarget[
   if (!entry.is_dir || !targets) return false;
   return targets.some((target) => target.recursive && target.path === entry.path);
 }
+
+/** Hide rows being deleted (folder + descendants) from Miller columns while delete runs. */
+export function shouldHideEntryWhileDeleting(
+  entry: FileEntry,
+  targets: DeletingTarget[] | undefined,
+): boolean {
+  if (!targets || targets.length === 0) return false;
+  if (isRecursiveDeleteRoot(entry, targets)) return true;
+  return isEntryDeleting(entry, targets);
+}

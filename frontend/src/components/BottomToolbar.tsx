@@ -26,9 +26,10 @@ import ShareIcon from "@mui/icons-material/Share";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import GridViewIcon from "@mui/icons-material/GridView";
 import { useRef, useState, type ChangeEvent } from "react";
-import { zip } from "fflate";
+import { Zip, ZipPassThrough, zip } from "fflate";
 import {
   deletePath,
+  fetchFilePreviewMetadata,
   downloadFile,
   listKnownUsers,
   makeUniqueArchiveName,
@@ -37,12 +38,14 @@ import {
   runWithConcurrency,
   sharePaths,
   streamDirectoryZip,
+  streamFileDownload,
   suggestMultiZipName,
   suggestedZipFileName,
-  uploadFile,
+  uploadBrowserFile,
 } from "@/api/altastata";
 
-const FOLDER_UPLOAD_CONCURRENCY = 4;
+const FOLDER_UPLOAD_CONCURRENCY_DEFAULT = 4;
+const FOLDER_UPLOAD_CONCURRENCY_MAX_SMALL_FILES = 12;
 import type { FileEntry } from "@/types";
 import type { DeletingTarget } from "@/utils/deletingTargets";
 
@@ -84,6 +87,19 @@ type SavePickerWindow = Window & {
     }>;
   }) => Promise<SaveFileHandle>;
 };
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let n = value;
+  let idx = 0;
+  while (n >= 1024 && idx < units.length - 1) {
+    n /= 1024;
+    idx += 1;
+  }
+  const fixed = n >= 100 || idx === 0 ? 0 : 1;
+  return `${n.toFixed(fixed)} ${units[idx]}`;
+}
 
 export default function BottomToolbar({
   selectedEntries,
@@ -150,6 +166,36 @@ export default function BottomToolbar({
   // Upload always targets a single context: the lone selection or the active dir.
   const uploadAnchor = singleSelection;
 
+  const chooseFolderUploadConcurrency = (files: File[]): number => {
+    if (files.length === 0) return FOLDER_UPLOAD_CONCURRENCY_DEFAULT;
+    // Small-file bursts (hundreds/thousands) are dominated by per-file RPC and
+    // metadata latency, so higher parallelism improves throughput significantly.
+    const maxSize = files.reduce((m, f) => Math.max(m, f.size || 0), 0);
+    const hw = (typeof navigator !== "undefined" && navigator.hardwareConcurrency)
+      ? navigator.hardwareConcurrency
+      : 8;
+    if (files.length >= 500 && maxSize <= 256 * 1024) {
+      return Math.min(FOLDER_UPLOAD_CONCURRENCY_MAX_SMALL_FILES, Math.max(6, hw));
+    }
+    if (files.length >= 100 && maxSize <= 1024 * 1024) {
+      return Math.min(8, Math.max(4, hw));
+    }
+    return FOLDER_UPLOAD_CONCURRENCY_DEFAULT;
+  };
+
+  const enqueuePendingFoldersForTargetPath = (targetPath: string) => {
+    if (!onAddPendingFolder) return;
+    const normalized = targetPath.trim().replace(/\/+/g, "/");
+    const lastSlash = normalized.lastIndexOf("/");
+    if (lastSlash <= 0) return;
+    let parent = normalized.slice(0, lastSlash);
+    while (parent && parent !== "/") {
+      onAddPendingFolder(parent);
+      const idx = parent.lastIndexOf("/");
+      parent = idx <= 0 ? "/" : parent.slice(0, idx);
+    }
+  };
+
   const selectedLabel = selectionCount === 0
     ? `Path: ${activePath}`
     : singleSelection
@@ -183,10 +229,35 @@ export default function BottomToolbar({
     const file = event.target.files?.[0];
     if (!file) return;
     const targetPath = resolveUploadTargetPath(file.name, uploadAnchor, activePath);
-    await runAction("Upload", async () => {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      await uploadFile(targetPath, bytes);
-    });
+    const totalBytes = file.size || 0;
+    setBusy(true);
+    setStatus(totalBytes > 0 ? `Uploading 0 B / ${formatBytes(totalBytes)}...` : "Uploading 0 B...");
+    try {
+      let lastProgressAt = 0;
+      let hasReportedProgress = false;
+      await uploadBrowserFile(targetPath, file, (bytesSent, totalBytes) => {
+        const now = Date.now();
+        const isFinal = totalBytes > 0 && bytesSent >= totalBytes;
+        if (hasReportedProgress && !isFinal && now - lastProgressAt < 200) return;
+        const progress = totalBytes > 0
+          ? `${formatBytes(bytesSent)} / ${formatBytes(totalBytes)}`
+          : formatBytes(bytesSent);
+        setStatus(`Uploading ${progress}...`);
+        hasReportedProgress = true;
+        lastProgressAt = now;
+      });
+      const doneSuffix = totalBytes > 0 ? ` (${formatBytes(totalBytes)})` : "";
+      setStatus(`Upload done${doneSuffix}`);
+      onRefresh();
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setStatus("Upload cancelled");
+      } else {
+        setStatus(error instanceof Error ? `Upload failed: ${error.message}` : "Upload failed");
+      }
+    } finally {
+      setBusy(false);
+    }
     event.target.value = "";
   };
 
@@ -200,17 +271,24 @@ export default function BottomToolbar({
     event.target.value = "";
     if (files.length === 0) return;
 
+    const folderUploadConcurrency = chooseFolderUploadConcurrency(files);
     setBusy(true);
     let completed = 0;
-    setStatus(`Uploading folder (0/${files.length}, ×${FOLDER_UPLOAD_CONCURRENCY})...`);
+    setStatus(`Uploading folder (0/${files.length}, ×${folderUploadConcurrency})...`);
     try {
-      await runWithConcurrency(files, FOLDER_UPLOAD_CONCURRENCY, async (file) => {
+      // Show the folder tree immediately while files are still uploading.
+      for (const file of files) {
         const relativePath = file.webkitRelativePath || file.name;
         const targetPath = resolveUploadTargetPath(relativePath, uploadAnchor, activePath);
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        await uploadFile(targetPath, bytes);
+        enqueuePendingFoldersForTargetPath(targetPath);
+      }
+
+      await runWithConcurrency(files, folderUploadConcurrency, async (file) => {
+        const relativePath = file.webkitRelativePath || file.name;
+        const targetPath = resolveUploadTargetPath(relativePath, uploadAnchor, activePath);
+        await uploadBrowserFile(targetPath, file);
         completed += 1;
-        setStatus(`Uploading folder (${completed}/${files.length}, ×${FOLDER_UPLOAD_CONCURRENCY})...`);
+        setStatus(`Uploading folder (${completed}/${files.length}, ×${folderUploadConcurrency})...`);
       });
       setStatus(`Folder upload done (${completed}/${files.length})`);
       onRefresh();
@@ -234,9 +312,17 @@ export default function BottomToolbar({
 
   const streamZipToHandle = async (handle: SaveFileHandle, path: string) => {
     const writable = await handle.createWritable();
+    let writtenBytes = 0;
+    let lastProgressAt = 0;
     try {
       await streamDirectoryZip(path, async (chunk) => {
         await writable.write(chunk);
+        writtenBytes += chunk.length;
+        const now = Date.now();
+        if (now - lastProgressAt >= 250) {
+          setStatus(`Downloading ZIP ${formatBytes(writtenBytes)}...`);
+          lastProgressAt = now;
+        }
       });
       await writable.close();
     } catch (error) {
@@ -249,18 +335,32 @@ export default function BottomToolbar({
     }
   };
 
-  const collectZipBlob = async (path: string): Promise<Blob> => {
-    const parts: BlobPart[] = [];
-    await streamDirectoryZip(path, (chunk) => {
-      parts.push(chunk.slice());
-    });
-    return new Blob(parts, { type: "application/zip" });
-  };
-
-  const writeBlobToHandle = async (handle: SaveFileHandle, blob: Blob) => {
+  const streamFileToHandle = async (
+    handle: SaveFileHandle,
+    path: string,
+    version: string | null,
+    totalBytesHint: number | null = null,
+  ) => {
+    const selected = selectedEntries.find((entry) => entry.path === path && entry.version === version) ?? null;
+    const totalBytes = totalBytesHint ?? (
+      typeof selected?.size === "number" && selected.size > 0 ? selected.size : null
+    );
+    let writtenBytes = 0;
+    let lastProgressAt = 0;
     const writable = await handle.createWritable();
     try {
-      await writable.write(await blob.arrayBuffer());
+      await streamFileDownload(path, version, async (chunk) => {
+        await writable.write(chunk);
+        writtenBytes += chunk.length;
+        const now = Date.now();
+        if (now - lastProgressAt >= 250) {
+          const progress = totalBytes
+            ? `${formatBytes(writtenBytes)} / ${formatBytes(totalBytes)}`
+            : formatBytes(writtenBytes);
+          setStatus(`Downloading ${progress}...`);
+          lastProgressAt = now;
+        }
+      });
       await writable.close();
     } catch (error) {
       try {
@@ -270,6 +370,49 @@ export default function BottomToolbar({
       }
       throw error;
     }
+  };
+
+  const collectFileBlobStreaming = async (
+    path: string,
+    version: string | null,
+    totalBytesHint: number | null,
+  ): Promise<Blob> => {
+    const parts: BlobPart[] = [];
+    let writtenBytes = 0;
+    let lastProgressAt = 0;
+    await streamFileDownload(path, version, (chunk) => {
+      parts.push(chunk.slice());
+      writtenBytes += chunk.length;
+      const now = Date.now();
+      if (now - lastProgressAt >= 250) {
+        const progress = totalBytesHint
+          ? `${formatBytes(writtenBytes)} / ${formatBytes(totalBytesHint)}`
+          : formatBytes(writtenBytes);
+        setStatus(`Downloading ${progress}...`);
+        lastProgressAt = now;
+      }
+    });
+    return new Blob(parts, { type: "application/octet-stream" });
+  };
+
+  const resolveSingleFileSizeHint = async (entry: FileEntry): Promise<number | null> => {
+    if (entry.is_dir) return null;
+    if (typeof entry.size === "number" && entry.size > 0) return entry.size;
+    try {
+      const metadata = await fetchFilePreviewMetadata(entry.path, entry.version);
+      if (typeof metadata.size === "number" && metadata.size >= 0) return metadata.size;
+    } catch {
+      // Best effort only for nicer progress display.
+    }
+    return null;
+  };
+
+  const collectZipBlob = async (path: string): Promise<Blob> => {
+    const parts: BlobPart[] = [];
+    await streamDirectoryZip(path, (chunk) => {
+      parts.push(chunk.slice());
+    });
+    return new Blob(parts, { type: "application/zip" });
   };
 
   const downloadSingleWithSavePicker = async (entry: FileEntry) => {
@@ -298,11 +441,17 @@ export default function BottomToolbar({
       }
     }
 
+    const totalBytesHint = entry.is_dir ? null : await resolveSingleFileSizeHint(entry);
+
     if (!saveHandle) {
       await runAction("Download", async () => {
         const blob = entry.is_dir
           ? await collectZipBlob(entry.path)
-          : await downloadFile(entry.path, entry.version);
+          : await collectFileBlobStreaming(
+            entry.path,
+            entry.version,
+            totalBytesHint,
+          );
         const url = URL.createObjectURL(blob);
         try {
           startBrowserDownload(url, downloadName);
@@ -318,8 +467,7 @@ export default function BottomToolbar({
         await streamZipToHandle(saveHandle as SaveFileHandle, entry.path);
         return;
       }
-      const blob = await downloadFile(entry.path, entry.version);
-      await writeBlobToHandle(saveHandle as SaveFileHandle, blob);
+      await streamFileToHandle(saveHandle as SaveFileHandle, entry.path, entry.version, totalBytesHint);
     });
   };
 
@@ -335,6 +483,108 @@ export default function BottomToolbar({
       // Default level (6); covers text well, only mild slowdown on already-compressed media.
       zip(files, (err, data) => (err ? reject(err) : resolve(data)));
     });
+  };
+
+  const streamMultiZipToHandle = async (
+    handle: SaveFileHandle,
+    entries: FileEntry[],
+    archiveName: string,
+  ): Promise<void> => {
+    const writable = await handle.createWritable();
+    let settled = false;
+    let totalZipBytes = 0;
+    let lastProgressAt = 0;
+    const totalEntries = entries.length;
+    let processedEntries = 0;
+    let writeChain: Promise<void> = Promise.resolve();
+
+    const rejectOnce = (reject: (reason?: unknown) => void, reason: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(reason);
+    };
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const zipper = new Zip((err, data, final) => {
+          if (err) {
+            rejectOnce(reject, err);
+            return;
+          }
+          if (settled) return;
+          if (data.length > 0) {
+            writeChain = writeChain
+              .then(async () => {
+                await writable.write(data);
+                totalZipBytes += data.length;
+                const now = Date.now();
+                if (now - lastProgressAt >= 250) {
+                  setStatus(
+                    `Writing ZIP ${formatBytes(totalZipBytes)} `
+                    + `(${processedEntries}/${totalEntries})...`,
+                  );
+                  lastProgressAt = now;
+                }
+              })
+              .catch((error) => {
+                rejectOnce(reject, error);
+              });
+          }
+          if (final) {
+            writeChain
+              .then(() => {
+                if (settled) return;
+                settled = true;
+                resolve();
+              })
+              .catch((error) => {
+                rejectOnce(reject, error);
+              });
+          }
+        });
+
+        void (async () => {
+          try {
+            const used = new Set<string>();
+            for (let i = 0; i < entries.length; i += 1) {
+              const entry = entries[i];
+              const baseName = entry.is_dir ? suggestedZipFileName(entry.path) : entry.name;
+              const uniqueName = makeUniqueArchiveName(baseName, used);
+              setStatus(`Preparing ZIP ${i + 1}/${totalEntries}: ${uniqueName}...`);
+              const zipEntry = new ZipPassThrough(uniqueName);
+              zipper.add(zipEntry);
+              if (entry.is_dir) {
+                await streamDirectoryZip(entry.path, (chunk) => {
+                  zipEntry.push(chunk, false);
+                });
+              } else {
+                await streamFileDownload(entry.path, entry.version, (chunk) => {
+                  zipEntry.push(chunk, false);
+                });
+              }
+              zipEntry.push(new Uint8Array(0), true);
+              processedEntries += 1;
+              setStatus(`Preparing ZIP (${processedEntries}/${totalEntries})...`);
+            }
+            zipper.end();
+          } catch (error) {
+            rejectOnce(reject, error);
+          }
+        })();
+      });
+      await writable.close();
+      setStatus(
+        `Download done (${processedEntries}/${totalEntries} packed into ${archiveName}, `
+        + `${formatBytes(totalZipBytes)})`,
+      );
+    } catch (error) {
+      try {
+        await writable.abort();
+      } catch {
+        // Ignore abort errors if writer is already closed.
+      }
+      throw error;
+    }
   };
 
   const handleDownloadMultiAsZip = async (entries: FileEntry[]) => {
@@ -364,6 +614,12 @@ export default function BottomToolbar({
     let collected = 0;
     setStatus(`Preparing ZIP (0/${total})...`);
     try {
+      if (saveHandle) {
+        await streamMultiZipToHandle(saveHandle, entries, archiveName);
+        onRefresh();
+        return;
+      }
+
       const archive: Record<string, Uint8Array> = {};
       const used = new Set<string>();
       for (const entry of entries) {
@@ -379,15 +635,11 @@ export default function BottomToolbar({
       // current `BlobPart` typings reject; the cast is purely a typing nudge.
       const zipBlob = new Blob([zipped as unknown as BlobPart], { type: "application/zip" });
 
-      if (saveHandle) {
-        await writeBlobToHandle(saveHandle, zipBlob);
-      } else {
-        const url = URL.createObjectURL(zipBlob);
-        try {
-          startBrowserDownload(url, archiveName);
-        } finally {
-          URL.revokeObjectURL(url);
-        }
+      const url = URL.createObjectURL(zipBlob);
+      try {
+        startBrowserDownload(url, archiveName);
+      } finally {
+        URL.revokeObjectURL(url);
       }
       setStatus(`Download done (${collected}/${total} packed into ${archiveName})`);
       onRefresh();
@@ -423,11 +675,17 @@ export default function BottomToolbar({
     const label = selectionCount === 1 ? "Delete" : `Delete ${selectionCount} items`;
     onMarkPathsDeleting?.(deletingMarks);
     setBusy(true);
+    const refreshTimer = window.setInterval(() => {
+      onRefresh();
+    }, 2500);
     try {
       for (let i = 0; i < targets.length; i += 1) {
         const entry = targets[i];
         const mark: DeletingTarget = { path: entry.path, recursive: entry.is_dir };
-        setStatus(`${label} ${i + 1}/${targets.length}: ${entry.path}`);
+        const statusLabel = entry.is_dir
+          ? `Deleting folder${targets.length > 1 ? ` ${i + 1}/${targets.length}` : ""}: ${entry.path}…`
+          : `${label} ${i + 1}/${targets.length}: ${entry.path}`;
+        setStatus(statusLabel);
         await deletePath(entry.path);
         onUnmarkPathsDeleting?.([mark]);
       }
@@ -441,6 +699,7 @@ export default function BottomToolbar({
       }
       setStatus(error instanceof Error ? `${label} failed: ${error.message}` : `${label} failed`);
     } finally {
+      window.clearInterval(refreshTimer);
       setBusy(false);
     }
   };
