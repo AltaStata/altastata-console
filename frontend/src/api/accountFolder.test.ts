@@ -52,7 +52,35 @@ describe("parseAccountFolder", () => {
     expect(material.myUser).toBe("bob123");
     expect(material.userProperties).toBe(props);
     expect(material.accountFiles["private.key"]).toBeTruthy();
-    expect(material.accountFiles["public.key"]).toBeUndefined();
+    expect(material.accountFiles["public.key"]).toBeTruthy();
+  });
+
+  it("includes license.jwt and org-ca.pem in account_files", async () => {
+    const props = [
+      "acccontainer-prefix=altastata-test-",
+      "myuser=bob123",
+      "accounttype=amazon-s3-secure",
+      "metadata-encryption=RSA",
+    ].join("\n");
+    const files = asFileList([
+      makeFile(
+        "altastata-test-bob123.user.properties",
+        "amazon.rsa.bob123/altastata-test-bob123.user.properties",
+        props,
+      ),
+      makeFile("private.key", "amazon.rsa.bob123/private.key", "encrypted-pem"),
+      makeFile("license.jwt", "amazon.rsa.bob123/license.jwt", "jwt.payload.sig"),
+      makeFile("org-ca.pem", "amazon.rsa.bob123/org-ca.pem", "-----BEGIN PUBLIC KEY-----\nX\n-----END PUBLIC KEY-----"),
+    ]);
+
+    const material = await parseAccountFolder(files);
+
+    expect(Object.keys(material.accountFiles).sort()).toEqual([
+      "license.jwt",
+      "org-ca.pem",
+      "private.key",
+    ]);
+    expect(new TextDecoder().decode(material.accountFiles["license.jwt"])).toBe("jwt.payload.sig");
   });
 
   it("parses PQC private keys", async () => {

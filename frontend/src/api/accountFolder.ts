@@ -1,6 +1,10 @@
 /**
  * Parse an account directory picked via {@code <input webkitdirectory>}.
  * See mycloud {@code CONSOLE_ACCOUNT_SETUP_DESIGN.md} §4 / §6.
+ *
+ * Everything except {@code *user.properties} goes into {@code account_files}
+ * (private keys, {@code license.jwt}, {@code org-ca.pem}, public keys, …).
+ * Gateway materializes the map as a temp account dir — same kit as on disk.
  */
 export interface LoginV2UploadMaterial {
   /** Top-level folder name from the picker (display only). */
@@ -11,11 +15,18 @@ export interface LoginV2UploadMaterial {
   accountFiles: Record<string, Uint8Array>;
 }
 
+/** Used only to decide whether a local private-key file is required for login. */
 const PRIVATE_KEY_BASENAMES = new Set([
   "private.key",
   "kyber_private.key",
   "dilithium_private.key",
   "hpcs-privkey.blob",
+]);
+
+const SKIP_BASENAMES = new Set([
+  ".ds_store",
+  "thumbs.db",
+  "desktop.ini",
 ]);
 
 function pathBasename(relativePath: string): string {
@@ -32,6 +43,12 @@ function topLevelFolderName(relativePath: string): string {
 
 function isUserPropertiesBasename(name: string): boolean {
   return name.endsWith(".user.properties");
+}
+
+function shouldSkipBasename(name: string): boolean {
+  if (!name || name === "." || name === "..") return true;
+  if (name.startsWith(".")) return true;
+  return SKIP_BASENAMES.has(name.toLowerCase());
 }
 
 function readUserProperty(userProperties: string, name: string): string {
@@ -77,7 +94,7 @@ export async function parseAccountFolder(files: FileList | readonly File[]): Pro
   }
 
   let userPropertiesFile: File | null = null;
-  const privateKeyFiles: File[] = [];
+  const otherFiles: File[] = [];
   let displayName = "";
 
   for (const file of fileArray) {
@@ -92,8 +109,8 @@ export async function parseAccountFolder(files: FileList | readonly File[]): Pro
         throw new Error("Account folder must contain exactly one *user.properties file.");
       }
       userPropertiesFile = file;
-    } else if (PRIVATE_KEY_BASENAMES.has(basename)) {
-      privateKeyFiles.push(file);
+    } else if (!shouldSkipBasename(basename)) {
+      otherFiles.push(file);
     }
   }
 
@@ -107,22 +124,23 @@ export async function parseAccountFolder(files: FileList | readonly File[]): Pro
     throw new Error("user.properties is missing myuser=.");
   }
 
-  const needsPrivateKeys = accountFolderRequiresPrivateKeyFiles(userProperties);
-  if (needsPrivateKeys && privateKeyFiles.length === 0) {
-    throw new Error(
-      "Account folder must contain a private key file (private.key, kyber_private.key + dilithium_private.key, or hpcs-privkey.blob).",
-    );
-  }
-
   const accountFiles: Record<string, Uint8Array> = {};
-  for (const file of privateKeyFiles) {
+  for (const file of otherFiles) {
     const relativePath = file.webkitRelativePath || file.name;
     const basename = pathBasename(relativePath);
     const bytes = new Uint8Array(await file.arrayBuffer());
     if (bytes.length === 0) {
-      throw new Error(`Key file is empty: ${basename}`);
+      throw new Error(`Account file is empty: ${basename}`);
     }
     accountFiles[basename] = bytes;
+  }
+
+  const needsPrivateKeys = accountFolderRequiresPrivateKeyFiles(userProperties);
+  const hasPrivateKey = Object.keys(accountFiles).some((name) => PRIVATE_KEY_BASENAMES.has(name));
+  if (needsPrivateKeys && !hasPrivateKey) {
+    throw new Error(
+      "Account folder must contain a private key file (private.key, kyber_private.key + dilithium_private.key, or hpcs-privkey.blob).",
+    );
   }
 
   if (!displayName) {
