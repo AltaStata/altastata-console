@@ -22,32 +22,12 @@ message User {
   string access_key = 3;
 }
 message GetMyAccountRequest {}
-message SetUserPropertiesRequest {
-  string user_name = 1;
-  string user_properties = 2;
-}
-message SetUserPropertiesResponse { bool success = 1; }
-message SetPrivateKeyRequest {
-  string user_name = 1;
-  string private_key_encrypted = 2;
-}
-message SetPrivateKeyResponse { bool success = 1; }
 // Wire-compatible with google.protobuf.Timestamp (same field numbers); we
 // inline it because protobufjs.parse() of a single-string proto definition
 // cannot resolve cross-package imports.
 message Timestamp {
   int64 seconds = 1;
   int32 nanos   = 2;
-}
-message LoginRequest {
-  string user_name        = 1;
-  string account_password = 2;
-  string client_hint      = 3;
-}
-message LoginResponse {
-  string    session_token = 1;
-  Timestamp expires_at    = 2;
-  string    access_key    = 3;
 }
 message LoginV2Upload {
   string user_properties = 1;
@@ -64,10 +44,6 @@ message LoginV2Response {
 }
 message LogoutRequest {}
 message LogoutResponse {}
-message RefreshRequest {}
-message RefreshResponse {
-  Timestamp expires_at = 1;
-}
 message FileStatus {
   string file_path = 1;
   string operation_state = 2;
@@ -750,15 +726,7 @@ async function grpcServerStream(
 }
 
 /**
- * Issues an {@code AuthService/Login} RPC with the supplied credentials and
- * stores the returned {@code sess-<random>} token in module state. Throws if
- * the response is missing {@code session_token} or if the gateway rejected the
- * call (typically {@code UNAUTHENTICATED} with {@code "Invalid credentials"}
- * for a wrong password, {@code FAILED_PRECONDITION} when SetUserProperties /
- * SetPrivateKey have not been called yet for this user).
- */
-/**
- * Build the {@code clientHint} sent on every {@code AuthService/Login} call.
+ * Build the {@code clientHint} sent on every {@code AuthService/LoginV2} call.
  *
  * <p>The backend enforces a single-session-per-{@code (userName, clientHint)}
  * invariant: a fresh Login from the same hint evicts the prior session and
