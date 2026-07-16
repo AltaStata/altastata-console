@@ -1,0 +1,12 @@
+AltaStata Console
+Copyright 2026 AltaStata Inc.
+
+This product includes software developed at AltaStata Inc.
+(https://altastata.com/).
+
+This repository contains the React/TypeScript web console client for AltaStata.
+It is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The AltaStata Java/gRPC runtime that this console talks to is distributed
+separately and may be licensed under the Business Source License 1.1
+(see https://github.com/AltaStata/sovereign-data-fabric).

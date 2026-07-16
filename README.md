@@ -208,4 +208,6 @@ See `docs/architecture.md` for screenshots and mapping to web components.
 
 ## License
 
-TBD — copy from `altastata` repo when finalizing.
+Licensed under the **Apache License, Version 2.0** — see [LICENSE](LICENSE).
+
+Copyright 2026 AltaStata Inc. See also [NOTICE](NOTICE).
