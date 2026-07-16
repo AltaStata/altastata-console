@@ -1,6 +1,6 @@
 /**
  * Parse an account directory picked via {@code <input webkitdirectory>}.
- * See mycloud {@code CONSOLE_ACCOUNT_SETUP_DESIGN.md} §4 / §6.
+ * Account-folder LoginV2 flow (folder picker + password).
  *
  * Everything except {@code *user.properties} goes into {@code account_files}
  * (private keys, {@code license.jwt}, {@code org-ca.pem}, public keys, …).

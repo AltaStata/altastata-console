@@ -1,11 +1,12 @@
 # altastata-console
 
 Web console for [AltaStata](https://altastata.com) — a Finder-style file browser
-for cloud accounts, modeled after the JavaFX desktop app
-(`mycloud/altastata-ui`).
+for cloud accounts, modeled after the JavaFX desktop app in
+[`AltaStata/sovereign-data-fabric`](https://github.com/AltaStata/sovereign-data-fabric)
+(`altastata-ui`).
 
-This repo is a React client for AltaStata Java gRPC (`mycloud/altastata-grpc`)
-and follows the same RPC flows as `altastata-python-package/tests/js-grpc-ui`.
+This repo is a React client for AltaStata Java gRPC (`altastata-grpc` in the
+same open-core repository).
 
 ## Architecture
 
@@ -45,8 +46,9 @@ altastata-console/
 ## Quick start (development)
 
 Prereqs: Node 20+, Java 17+.
-Ensure AltaStata gRPC server is available on `127.0.0.1:9877`
-(same as `altastata-python-package/tests/js-grpc-ui`).
+Ensure an AltaStata gRPC server is available on `127.0.0.1:9877`
+(for example via `altastata-grpc-server` from the
+[`altastata` Python package](https://github.com/AltaStata/altastata-python-package)).
 
 ```bash
 # Frontend
@@ -57,22 +59,15 @@ npm run dev   # → http://localhost:5173
 
 Open <http://localhost:5173>.
 
-Open the top-right settings button in the app and provide runtime values:
+Open the top-right **Settings** button and:
 
-- gRPC base URL
-- account ID
-- user name
-- user properties
-- private key
-- password
+1. Set the gRPC base URL (default `http://127.0.0.1:9877`)
+2. Choose your local **account folder** under `~/.altastata/accounts/...`
+3. Enter the account password for RSA/PQC (leave blank for HPCS/HSM)
+4. Click **Sign in** (LoginV2)
 
-Then use **Save & Run Bootstrap** to run:
-
-1. `SetUserProperties`
-2. `SetPrivateKey`
-3. `SetPasswordForUser`
-
-This is now the preferred flow for local development.
+Optional: copy `frontend/.env.example` to `frontend/.env.local` for local
+defaults. Never commit real credentials.
 
 The Settings dialog header also shows the bundle's build version and ISO
 timestamp (baked in at build time via Vite `define`) so it is unambiguous
@@ -81,80 +76,16 @@ which dist the browser is serving — handy when chasing cache-busting issues.
 ### Live updates (events)
 
 While the UI is open it keeps a long-running gRPC server-streaming call to
-`altastata.v1.EventsService/Watch`. The Java backend forwards
-`SecureCloudEventProcessor` notifications as typed `Event` payloads
-(`FileSharedEvent` when another user shares a file with the current user,
-`FileUnsharedEvent` when access is revoked or a shared file is deleted) and
-the UI auto-refreshes the current view so the file list never goes stale.
-The stream auto-reconnects on transient failures with the last seen
-`since_sequence` to replay any missed events from the per-user ring buffer,
-and a follow-up refresh is scheduled ~7s after every event to absorb the
-gap between the event dispatch and the backend's "Finishing shot"
-finalisation.
+`altastata.v1.EventsService/Watch`. The Java backend forwards share/delete
+notifications as typed `Event` payloads and the UI auto-refreshes the current
+view. The stream auto-reconnects on transient failures with the last seen
+`since_sequence` to replay any missed events.
 
 ### UI log panel
 
 The terminal icon next to the settings button opens a "UI log" dialog
 showing recent `console.*` output captured by an in-app ring buffer
-(`frontend/src/utils/logBuffer.ts`). It's intended for debugging gRPC /
-auth issues without forcing the user to open browser DevTools, and shows
-the same lines that appear in the real console.
-
-### Generate keys (GenerateKeys)
-
-The **key** icon in the top bar opens **Generate keys**:
-
-1. Pick key type (RSA, PQC, or HPCS (RSA)). HPCS requires GREP11 on the gateway (`GREP11_YAML` / populated `grep11client.yaml`).
-2. Optional folder name (e.g. `rsa.myuser`) and password (RSA/PQC only).
-3. **Generate keys** → **Download zip** (`<folder>.altastata.zip`).
-4. Unpack under `~/.altastata/accounts/`, send `public.key` to your org admin, save
-   the returned `*user.properties` into the same folder, then **Settings → Sign in**.
-
-Requires a gateway with `AccountSetupService.GenerateKeys` (local dev:
-`altastata-services` on port **9880**, not the older Docker image on 9877).
-
-You can still prefill defaults via `frontend/.env.local` (safe placeholders only):
-
-```bash
-VITE_ALTASTATA_GRPC_BASE_URL=http://127.0.0.1:9877
-VITE_ALTASTATA_ACCOUNT_ID=amazon.rsa.<user>
-VITE_ALTASTATA_GRPC_USER_NAME=<user>
-# Password is entered manually in Settings each session.
-# Sign in: choose account folder (*user.properties + private keys) → LoginV2 upload.
-VITE_ALTASTATA_AUTO_BOOTSTRAP=true
-```
-
-## Secrets policy
-
-- Never commit real account key files or `password`.
-- Account material (`*user.properties`, private keys) is held in memory only — not localStorage.
-- `password` is not persisted to browser localStorage by the app.
-- Keep sensitive values in local runtime settings and/or local `.env.local`.
-- `.env.local` is gitignored in this repo, but always verify with `git status` before committing.
-- If a secret is accidentally committed, rotate it immediately.
-
-### Optional pre-commit secret guard
-
-This repo includes `scripts/prevent-secrets-commit.sh` to block common mistakes
-before commit.
-
-Enable it locally:
-
-```bash
-cd /path/to/altastata-console
-ln -sf ../../scripts/prevent-secrets-commit.sh .git/hooks/pre-commit
-```
-
-What it blocks:
-
-- staging `.env`-style files and common key files (`.pem`, `private.key`)
-- staged diff lines that look like private keys or password fields
-
-Intentional override (rare):
-
-```bash
-ALLOW_SECRETS_COMMIT=1 git commit -m "..."
-```
+(`frontend/src/utils/logBuffer.ts`).
 
 ## Production build
 
@@ -171,22 +102,20 @@ Python, FastAPI, or Node runtime is required at runtime.
 ### Distribution
 
 The bundle ships inside the [`altastata` Python package][pyalt] under
-`altastata/lib/altastata-console-static/`. Any image that already
-includes `altastata` therefore already includes the UI, and the Java
-gRPC server (`mycloud/altastata-grpc`) serves those static files
-directly on `:9877` — no separate web container is needed.
+`altastata/lib/altastata-console-static/`. The Java gRPC server
+(`altastata-grpc`) serves those static files directly on `:9877` — no
+separate web container is needed.
 
-[pyalt]: https://github.com/SergeVil/altastata-python-package
+[pyalt]: https://github.com/AltaStata/altastata-python-package
 
 The bundle is **not committed** to the Python package repo
-(`altastata/lib/` is gitignored, same policy as
-`altastata-grpc-*-uber.jar`). It is rebuilt locally before each
-release by
+(`altastata/lib/` is gitignored, same policy as the runtime uber JAR).
+It is rebuilt locally before each release by
 [`altastata-python-package/scripts/build-bundled-artifacts.sh`][buildscript],
 which runs `npm run build` here, then copies `frontend/dist/` into
 `altastata-python-package/altastata/lib/altastata-console-static/`.
 
-[buildscript]: https://github.com/SergeVil/altastata-python-package/blob/openshift/scripts/build-bundled-artifacts.sh
+[buildscript]: https://github.com/AltaStata/altastata-python-package/blob/main/scripts/build-bundled-artifacts.sh
 
 There is no Docker step in this repo.
 
@@ -196,15 +125,14 @@ There is no Docker step in this repo.
   Its consumers don't want a node toolchain pulled in via `pip install`.
 - Console release cadence is independent (UI fixes ship more often than
   library API changes).
-- Mirrors the pattern already established in `mycloud/`:
-  `altastata-admin-ui` / `altastata-admin-api` are similarly split.
 
 ## Reference UI
 
-The visual target is `mycloud/altastata-ui` (JavaFX desktop, "AltaStata
-Cloud File Explorer" v1.0.6) — three columns (folders → files → preview),
-account name in the title bar, action toolbar at the bottom, light theme.
-See `docs/architecture.md` for screenshots and mapping to web components.
+The visual target is the JavaFX desktop explorer in
+`AltaStata/sovereign-data-fabric` (`altastata-ui`) — three columns
+(folders → files → preview), account name in the title bar, action toolbar
+at the bottom, light theme. See `docs/architecture.md` for mapping to web
+components.
 
 ## License
 

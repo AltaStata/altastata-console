@@ -2,8 +2,8 @@
 
 ## Visual reference
 
-The visual target is **`mycloud/altastata-ui`** (JavaFX desktop, "AltaStata
-Cloud File Explorer"). Three columns:
+The visual target is the JavaFX desktop explorer in
+**`AltaStata/sovereign-data-fabric` (`altastata-ui`)**. Three columns:
 
 ```
 ┌─────────────┬─────────────┬───────────────────────────────┐
@@ -22,7 +22,7 @@ column to the right. Clicking a file replaces the right-most preview pane.
 
 ## Component map
 
-| JavaFX (mycloud/altastata-ui) | React (this repo) |
+| JavaFX (`altastata-ui`) | React (this repo) |
 |---|---|
 | `MainController` columns | `frontend/src/components/MillerColumns.tsx` |
 | `FileListView` per column | `frontend/src/components/FileColumn.tsx` |
@@ -79,15 +79,16 @@ gRPC-Web.
 
 The bundle is distributed through the `altastata` Python package
 under `altastata/lib/altastata-console-static/`. Any image or
-environment that installs `altastata` (pip / Jupyter / mycloud
-containers) automatically gets the UI bytes alongside the library.
+environment that installs `altastata` (pip / Jupyter containers)
+automatically gets the UI bytes alongside the library.
 
-In production, the Java gRPC server (`mycloud/altastata-grpc`) serves
-those static files directly from the filesystem path supplied via the
-`ALTASTATA_WEB_UI_DIR` environment variable on `:9877` — both gRPC
-API and SPA come from the same origin and port, so CORS is a non-issue
-and there is no separate web server to operate. The Python launcher
-(`altastata-grpc-server` in the `altastata` package) sets
+In production, the Java gRPC server (`altastata-grpc` from
+`AltaStata/sovereign-data-fabric`) serves those static files directly
+from the filesystem path supplied via the `ALTASTATA_WEB_UI_DIR`
+environment variable on `:9877` — both gRPC API and SPA come from the
+same origin and port, so CORS is a non-issue and there is no separate
+web server to operate. The Python launcher (`altastata-grpc-server` in
+the `altastata` package) sets
 `ALTASTATA_WEB_UI_DIR` automatically when the bundle is present at
 `altastata/lib/altastata-console-static/`; if the directory is
 missing or `index.html` is absent, the server logs a warning and runs

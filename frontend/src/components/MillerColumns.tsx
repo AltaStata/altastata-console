@@ -56,7 +56,7 @@ interface Props {
  * - Selecting a folder appends a new column to the right.
  * - Selecting a file opens the right-most "preview" panel.
  *
- * Mirrors mycloud/altastata-ui (JavaFX desktop) layout.
+ * Mirrors altastata-ui (JavaFX desktop) layout.
  */
 export default function MillerColumns({
   reloadToken = 0,
