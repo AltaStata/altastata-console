@@ -1,7 +1,7 @@
 import { createTheme } from "@mui/material/styles";
 
 /**
- * Visual target: mycloud/altastata-ui (JavaFX desktop, "AltaStata Cloud File Explorer").
+ * Visual target: altastata-ui (JavaFX desktop, "AltaStata Cloud File Explorer").
  * Light theme, narrow row spacing, blue selection, near-flat surfaces, thin dividers.
  */
 export const theme = createTheme({
