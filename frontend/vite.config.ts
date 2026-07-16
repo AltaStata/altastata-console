@@ -40,6 +40,7 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
-    sourcemap: true,
+    // Do not ship .js.map into PyPI / gateway bundles (full client source).
+    sourcemap: false,
   },
 });
