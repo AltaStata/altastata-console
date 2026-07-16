@@ -66,8 +66,15 @@ Open the top-right **Settings** button and:
 3. Enter the account password for RSA/PQC (leave blank for HPCS/HSM)
 4. Click **Sign in** (LoginV2)
 
-Optional: copy `frontend/.env.example` to `frontend/.env.local` for local
-defaults. Never commit real credentials.
+Optional: copy `frontend/.env.example` → `frontend/.env.local` only to
+override the gRPC URL (default is already `http://127.0.0.1:9877`).
+Do not put passwords or keys in env files — use the account-folder Sign in.
+
+After cloning, install the secrets pre-commit hook once:
+
+```bash
+./scripts/install-git-hooks.sh
+```
 
 The Settings dialog header also shows the bundle's build version and ISO
 timestamp (baked in at build time via Vite `define`) so it is unambiguous

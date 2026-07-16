@@ -65,10 +65,13 @@ The frontend currently mirrors JavaFX behavior:
 
 ## Runtime settings and secrets
 
-- Connection/auth settings are provided at runtime from the in-app Settings dialog.
-- Values are stored locally in browser storage for developer convenience.
-- `.env.local` can provide local defaults, but secrets are not meant to be committed.
-- Source control policy: never commit real user properties, private keys, or passwords.
+- Connection/auth settings are provided at runtime from the in-app Settings dialog
+  (account folder + password → LoginV2). Password is session-only; not persisted.
+- Non-secret UI prefs may live in browser `localStorage`.
+- Optional `frontend/.env.local` may override only `VITE_ALTASTATA_GRPC_BASE_URL`.
+  Do not put passwords, private keys, or `user.properties` in env files.
+- Source control policy: never commit real credentials; run
+  `./scripts/install-git-hooks.sh` so `prevent-secrets-commit.sh` blocks them.
 
 ## Deployment
 
