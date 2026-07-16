@@ -1,19 +1,11 @@
 import {
-  Autocomplete,
   Box,
-  Button,
-  CircularProgress,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
+  Divider,
   IconButton,
   InputBase,
   LinearProgress,
   Stack,
-  TextField,
   Tooltip,
-  Divider,
   Typography,
 } from "@mui/material";
 import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
@@ -26,82 +18,48 @@ import ShareIcon from "@mui/icons-material/Share";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import GridViewIcon from "@mui/icons-material/GridView";
 import { useRef, useState, type ChangeEvent } from "react";
-import { Zip, ZipPassThrough, zip } from "fflate";
 import {
   deletePath,
-  fetchFilePreviewMetadata,
-  downloadFile,
   listKnownUsers,
   makeUniqueArchiveName,
   resolveUploadTargetPath,
   revokePaths,
   runWithConcurrency,
   sharePaths,
-  streamDirectoryZip,
-  streamFileDownload,
   suggestMultiZipName,
   suggestedZipFileName,
   uploadBrowserFile,
 } from "@/api/altastata";
-
-const FOLDER_UPLOAD_CONCURRENCY_DEFAULT = 4;
-const FOLDER_UPLOAD_CONCURRENCY_MAX_SMALL_FILES = 12;
-const ZIP_WRITE_BACKPRESSURE_BYTES = 8 * 1024 * 1024;
 import type { FileEntry } from "@/types";
 import type { DeletingTarget } from "@/utils/deletingTargets";
+import AccessDialog from "./AccessDialog";
+import NewFolderDialog from "./NewFolderDialog";
+import {
+  buildZipArchive,
+  collectFileBlobStreaming,
+  collectZipBlob,
+  downloadEntryAsBytes,
+  resolveSingleFileSizeHint,
+  startBrowserDownload,
+  streamFileToHandle,
+  streamMultiZipToHandle,
+  streamZipToHandle,
+} from "./downloadPipeline";
+import { formatBytes } from "./formatBytes";
+import type {
+  AccessDialogMode,
+  AccessDialogState,
+  BottomToolbarProps,
+  NewFolderDialogState,
+  SaveFileHandle,
+  SavePickerWindow,
+} from "./types";
+import {
+  chooseFolderUploadConcurrency,
+  enqueuePendingFoldersForTargetPath,
+} from "./uploadHelpers";
 
-interface Props {
-  selectedEntries: FileEntry[];
-  activePath: string;
-  /**
-   * Full paths of folders the user has just created locally and that are
-   * not yet backed by any file in the cloud. We need this here only so the
-   * New Folder dialog can warn on duplicates BEFORE adding another pending
-   * entry; the actual merge into the column listing happens in App.tsx /
-   * MillerColumns.
-   */
-  pendingFolderPaths?: Set<string>;
-  /**
-   * Owner-supplied callback that registers a new pending folder. Receives
-   * the FULL absolute path (e.g. `/foo/new-dir`).
-   */
-  onAddPendingFolder?: (fullPath: string) => void;
-  onRemovePendingFolders?: (fullPaths: string[]) => void;
-  onMarkPathsDeleting?: (targets: DeletingTarget[]) => void;
-  onUnmarkPathsDeleting?: (targets: DeletingTarget[]) => void;
-  onRefresh: () => void;
-}
-
-type SaveFileHandle = {
-  createWritable: () => Promise<{
-    write: (data: Uint8Array | ArrayBuffer) => Promise<void>;
-    close: () => Promise<void>;
-    abort: () => Promise<void>;
-  }>;
-};
-
-type SavePickerWindow = Window & {
-  showSaveFilePicker?: (options?: {
-    suggestedName?: string;
-    types?: Array<{
-      description: string;
-      accept: Record<string, string[]>;
-    }>;
-  }) => Promise<SaveFileHandle>;
-};
-
-function formatBytes(value: number): string {
-  if (!Number.isFinite(value) || value < 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let n = value;
-  let idx = 0;
-  while (n >= 1024 && idx < units.length - 1) {
-    n /= 1024;
-    idx += 1;
-  }
-  const fixed = n >= 100 || idx === 0 ? 0 : 1;
-  return `${n.toFixed(fixed)} ${units[idx]}`;
-}
+export type { BottomToolbarProps };
 
 export default function BottomToolbar({
   selectedEntries,
@@ -112,15 +70,14 @@ export default function BottomToolbar({
   onMarkPathsDeleting,
   onUnmarkPathsDeleting,
   onRefresh,
-}: Props) {
+}: BottomToolbarProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string>("Ready");
   const [filterText, setFilterText] = useState("");
-  const [newFolderDialog, setNewFolderDialog] = useState<
-    { name: string; error: string | null } | null
-  >(null);
+  const [newFolderDialog, setNewFolderDialog] = useState<NewFolderDialogState | null>(null);
+  const [accessDialog, setAccessDialog] = useState<AccessDialogState | null>(null);
 
   const selectionCount = selectedEntries.length;
   const singleSelection: FileEntry | null = selectionCount === 1 ? selectedEntries[0] : null;
@@ -166,45 +123,9 @@ export default function BottomToolbar({
     setStatus(`Created (pending) ${fullPath}`);
     setNewFolderDialog(null);
   };
+
   // Upload always targets a single context: the lone selection or the active dir.
   const uploadAnchor = singleSelection;
-
-  const chooseFolderUploadConcurrency = (files: File[]): number => {
-    if (files.length === 0) return FOLDER_UPLOAD_CONCURRENCY_DEFAULT;
-    // Small-file bursts (hundreds/thousands) are dominated by per-file RPC and
-    // metadata latency, so higher parallelism improves throughput significantly.
-    const maxSize = files.reduce((m, f) => Math.max(m, f.size || 0), 0);
-    const hw = (typeof navigator !== "undefined" && navigator.hardwareConcurrency)
-      ? navigator.hardwareConcurrency
-      : 8;
-    if (files.length >= 500 && maxSize <= 256 * 1024) {
-      return Math.min(FOLDER_UPLOAD_CONCURRENCY_MAX_SMALL_FILES, Math.max(6, hw));
-    }
-    if (files.length >= 100 && maxSize <= 1024 * 1024) {
-      return Math.min(8, Math.max(4, hw));
-    }
-    return FOLDER_UPLOAD_CONCURRENCY_DEFAULT;
-  };
-
-  const enqueuePendingFoldersForTargetPath = (
-    targetPath: string,
-    existing: ReadonlySet<string>,
-    addedNow: Set<string>,
-  ) => {
-    if (!onAddPendingFolder) return;
-    const normalized = targetPath.trim().replace(/\/+/g, "/");
-    const lastSlash = normalized.lastIndexOf("/");
-    if (lastSlash <= 0) return;
-    let parent = normalized.slice(0, lastSlash);
-    while (parent && parent !== "/") {
-      if (!existing.has(parent) && !addedNow.has(parent)) {
-        onAddPendingFolder(parent);
-        addedNow.add(parent);
-      }
-      const idx = parent.lastIndexOf("/");
-      parent = idx <= 0 ? "/" : parent.slice(0, idx);
-    }
-  };
 
   const selectedLabel = selectionCount === 0
     ? `Path: ${activePath}`
@@ -292,7 +213,14 @@ export default function BottomToolbar({
       for (const file of files) {
         const relativePath = file.webkitRelativePath || file.name;
         const targetPath = resolveUploadTargetPath(relativePath, uploadAnchor, activePath);
-        enqueuePendingFoldersForTargetPath(targetPath, existingPendingFolders, addedPendingFolders);
+        if (onAddPendingFolder) {
+          enqueuePendingFoldersForTargetPath(
+            targetPath,
+            existingPendingFolders,
+            addedPendingFolders,
+            onAddPendingFolder,
+          );
+        }
       }
 
       await runWithConcurrency(files, folderUploadConcurrency, async (file) => {
@@ -313,121 +241,6 @@ export default function BottomToolbar({
     } finally {
       setBusy(false);
     }
-  };
-
-  const startBrowserDownload = (href: string, downloadName: string) => {
-    const link = document.createElement("a");
-    link.href = href;
-    link.download = downloadName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    setStatus("Download started (watch browser downloads for completion)");
-  };
-
-  const streamZipToHandle = async (handle: SaveFileHandle, path: string) => {
-    const writable = await handle.createWritable();
-    let writtenBytes = 0;
-    let lastProgressAt = 0;
-    try {
-      await streamDirectoryZip(path, async (chunk) => {
-        await writable.write(chunk);
-        writtenBytes += chunk.length;
-        const now = Date.now();
-        if (now - lastProgressAt >= 250) {
-          setStatus(`Downloading ZIP ${formatBytes(writtenBytes)}...`);
-          lastProgressAt = now;
-        }
-      });
-      await writable.close();
-    } catch (error) {
-      try {
-        await writable.abort();
-      } catch {
-        // Ignore abort errors if writer is already closed.
-      }
-      throw error;
-    }
-  };
-
-  const streamFileToHandle = async (
-    handle: SaveFileHandle,
-    path: string,
-    version: string | null,
-    totalBytesHint: number | null = null,
-  ) => {
-    const selected = selectedEntries.find((entry) => entry.path === path && entry.version === version) ?? null;
-    const totalBytes = totalBytesHint ?? (
-      typeof selected?.size === "number" && selected.size > 0 ? selected.size : null
-    );
-    let writtenBytes = 0;
-    let lastProgressAt = 0;
-    const writable = await handle.createWritable();
-    try {
-      await streamFileDownload(path, version, async (chunk) => {
-        await writable.write(chunk);
-        writtenBytes += chunk.length;
-        const now = Date.now();
-        if (now - lastProgressAt >= 250) {
-          const progress = totalBytes
-            ? `${formatBytes(writtenBytes)} / ${formatBytes(totalBytes)}`
-            : formatBytes(writtenBytes);
-          setStatus(`Downloading ${progress}...`);
-          lastProgressAt = now;
-        }
-      });
-      await writable.close();
-    } catch (error) {
-      try {
-        await writable.abort();
-      } catch {
-        // Ignore abort errors if writer is already closed.
-      }
-      throw error;
-    }
-  };
-
-  const collectFileBlobStreaming = async (
-    path: string,
-    version: string | null,
-    totalBytesHint: number | null,
-  ): Promise<Blob> => {
-    const parts: BlobPart[] = [];
-    let writtenBytes = 0;
-    let lastProgressAt = 0;
-    await streamFileDownload(path, version, (chunk) => {
-      parts.push(chunk.slice());
-      writtenBytes += chunk.length;
-      const now = Date.now();
-      if (now - lastProgressAt >= 250) {
-        const progress = totalBytesHint
-          ? `${formatBytes(writtenBytes)} / ${formatBytes(totalBytesHint)}`
-          : formatBytes(writtenBytes);
-        setStatus(`Downloading ${progress}...`);
-        lastProgressAt = now;
-      }
-    });
-    return new Blob(parts, { type: "application/octet-stream" });
-  };
-
-  const resolveSingleFileSizeHint = async (entry: FileEntry): Promise<number | null> => {
-    if (entry.is_dir) return null;
-    if (typeof entry.size === "number" && entry.size > 0) return entry.size;
-    try {
-      const metadata = await fetchFilePreviewMetadata(entry.path, entry.version);
-      if (typeof metadata.size === "number" && metadata.size >= 0) return metadata.size;
-    } catch {
-      // Best effort only for nicer progress display.
-    }
-    return null;
-  };
-
-  const collectZipBlob = async (path: string): Promise<Blob> => {
-    const parts: BlobPart[] = [];
-    await streamDirectoryZip(path, (chunk) => {
-      parts.push(chunk.slice());
-    });
-    return new Blob(parts, { type: "application/zip" });
   };
 
   const downloadSingleWithSavePicker = async (entry: FileEntry) => {
@@ -466,10 +279,11 @@ export default function BottomToolbar({
             entry.path,
             entry.version,
             totalBytesHint,
+            setStatus,
           );
         const url = URL.createObjectURL(blob);
         try {
-          startBrowserDownload(url, downloadName);
+          startBrowserDownload(url, downloadName, setStatus);
         } finally {
           URL.revokeObjectURL(url);
         }
@@ -479,144 +293,18 @@ export default function BottomToolbar({
 
     await runAction("Download", async () => {
       if (entry.is_dir) {
-        await streamZipToHandle(saveHandle as SaveFileHandle, entry.path);
+        await streamZipToHandle(saveHandle as SaveFileHandle, entry.path, setStatus);
         return;
       }
-      await streamFileToHandle(saveHandle as SaveFileHandle, entry.path, entry.version, totalBytesHint);
-    });
-  };
-
-  const downloadEntryAsBytes = async (entry: FileEntry): Promise<Uint8Array> => {
-    const blob = entry.is_dir
-      ? await collectZipBlob(entry.path)
-      : await downloadFile(entry.path, entry.version);
-    return new Uint8Array(await blob.arrayBuffer());
-  };
-
-  const buildZipArchive = (files: Record<string, Uint8Array>): Promise<Uint8Array> => {
-    return new Promise((resolve, reject) => {
-      // Default level (6); covers text well, only mild slowdown on already-compressed media.
-      zip(files, (err, data) => (err ? reject(err) : resolve(data)));
-    });
-  };
-
-  const streamMultiZipToHandle = async (
-    handle: SaveFileHandle,
-    entries: FileEntry[],
-    archiveName: string,
-  ): Promise<void> => {
-    const writable = await handle.createWritable();
-    let settled = false;
-    let totalZipBytes = 0;
-    let pendingWriteBytes = 0;
-    let lastProgressAt = 0;
-    const totalEntries = entries.length;
-    let processedEntries = 0;
-    let writeChain: Promise<void> = Promise.resolve();
-    let writeError: unknown = null;
-
-    const rejectOnce = (reject: (reason?: unknown) => void, reason: unknown) => {
-      if (settled) return;
-      settled = true;
-      reject(reason);
-    };
-
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const zipper = new Zip((err, data, final) => {
-          if (err) {
-            rejectOnce(reject, err);
-            return;
-          }
-          if (settled) return;
-          if (data.length > 0) {
-            const writeData = data.slice();
-            pendingWriteBytes += writeData.length;
-            writeChain = writeChain
-              .then(async () => {
-                await writable.write(writeData);
-                totalZipBytes += writeData.length;
-                pendingWriteBytes -= writeData.length;
-                const now = Date.now();
-                if (now - lastProgressAt >= 250) {
-                  setStatus(
-                    `Writing ZIP ${formatBytes(totalZipBytes)} `
-                    + `(${processedEntries}/${totalEntries})...`,
-                  );
-                  lastProgressAt = now;
-                }
-              })
-              .catch((error) => {
-                writeError = error;
-                pendingWriteBytes = 0;
-                rejectOnce(reject, error);
-              });
-          }
-          if (final) {
-            writeChain
-              .then(() => {
-                if (settled) return;
-                settled = true;
-                resolve();
-              })
-              .catch((error) => {
-                rejectOnce(reject, error);
-              });
-          }
-        });
-
-        void (async () => {
-          try {
-            const maybeDrainWrites = async () => {
-              if (writeError) throw writeError;
-              if (pendingWriteBytes >= ZIP_WRITE_BACKPRESSURE_BYTES) {
-                await writeChain;
-              }
-              if (writeError) throw writeError;
-            };
-            const used = new Set<string>();
-            for (let i = 0; i < entries.length; i += 1) {
-              const entry = entries[i];
-              const baseName = entry.is_dir ? suggestedZipFileName(entry.path) : entry.name;
-              const uniqueName = makeUniqueArchiveName(baseName, used);
-              setStatus(`Preparing ZIP ${i + 1}/${totalEntries}: ${uniqueName}...`);
-              const zipEntry = new ZipPassThrough(uniqueName);
-              zipper.add(zipEntry);
-              if (entry.is_dir) {
-                await streamDirectoryZip(entry.path, async (chunk) => {
-                  zipEntry.push(chunk, false);
-                  await maybeDrainWrites();
-                });
-              } else {
-                await streamFileDownload(entry.path, entry.version, async (chunk) => {
-                  zipEntry.push(chunk, false);
-                  await maybeDrainWrites();
-                });
-              }
-              zipEntry.push(new Uint8Array(0), true);
-              await maybeDrainWrites();
-              processedEntries += 1;
-              setStatus(`Preparing ZIP (${processedEntries}/${totalEntries})...`);
-            }
-            zipper.end();
-          } catch (error) {
-            rejectOnce(reject, error);
-          }
-        })();
-      });
-      await writable.close();
-      setStatus(
-        `Download done (${processedEntries}/${totalEntries} packed into ${archiveName}, `
-        + `${formatBytes(totalZipBytes)})`,
+      await streamFileToHandle(
+        saveHandle as SaveFileHandle,
+        entry.path,
+        entry.version,
+        setStatus,
+        totalBytesHint,
+        selectedEntries,
       );
-    } catch (error) {
-      try {
-        await writable.abort();
-      } catch {
-        // Ignore abort errors if writer is already closed.
-      }
-      throw error;
-    }
+    });
   };
 
   const handleDownloadMultiAsZip = async (entries: FileEntry[]) => {
@@ -647,7 +335,7 @@ export default function BottomToolbar({
     setStatus(`Preparing ZIP (0/${total})...`);
     try {
       if (saveHandle) {
-        await streamMultiZipToHandle(saveHandle, entries, archiveName);
+        await streamMultiZipToHandle(saveHandle, entries, archiveName, setStatus);
         onRefresh();
         return;
       }
@@ -669,7 +357,7 @@ export default function BottomToolbar({
 
       const url = URL.createObjectURL(zipBlob);
       try {
-        startBrowserDownload(url, archiveName);
+        startBrowserDownload(url, archiveName, setStatus);
       } finally {
         URL.revokeObjectURL(url);
       }
@@ -735,17 +423,6 @@ export default function BottomToolbar({
       setBusy(false);
     }
   };
-
-  type AccessDialogMode = "share" | "revoke";
-  interface AccessDialogState {
-    mode: AccessDialogMode;
-    targets: FileEntry[];
-    loadingUsers: boolean;
-    knownUsers: string[];
-    selected: string;
-    error: string | null;
-  }
-  const [accessDialog, setAccessDialog] = useState<AccessDialogState | null>(null);
 
   const openAccessDialog = async (mode: AccessDialogMode) => {
     if (selectionCount === 0 || busy) return;
@@ -863,7 +540,7 @@ export default function BottomToolbar({
         >
           <span>
             <IconButton size="small" disabled={busy || selectionCount === 0} onClick={() => void handleDelete()}>
-            <DeleteIcon fontSize="small" />
+              <DeleteIcon fontSize="small" />
             </IconButton>
           </span>
         </Tooltip>
@@ -1010,139 +687,21 @@ export default function BottomToolbar({
         onChange={(e) => void handleUploadFolderSelected(e)}
       />
 
-      <Dialog
+      <NewFolderDialog
         open={newFolderDialog !== null}
+        activePath={activePath}
+        state={newFolderDialog}
         onClose={closeNewFolderDialog}
-        fullWidth
-        maxWidth="xs"
-      >
-        <DialogTitle sx={{ pb: 1 }}>New folder</DialogTitle>
-        <DialogContent dividers>
-          <Stack spacing={1.5} sx={{ mt: 0.5 }}>
-            <Typography variant="body2" color="text.secondary">
-              Inside: {activePath}
-            </Typography>
-            <TextField
-              autoFocus
-              size="small"
-              label="Folder name"
-              placeholder="my-folder"
-              value={newFolderDialog?.name ?? ""}
-              onChange={(e) => {
-                if (!newFolderDialog) return;
-                setNewFolderDialog({
-                  ...newFolderDialog,
-                  name: e.target.value,
-                  error: null,
-                });
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  submitNewFolderDialog();
-                }
-              }}
-              fullWidth
-            />
-            <Typography variant="caption" color="text.secondary">
-              The folder is local to this browser session until you upload a
-              file into it. AltaStata stores files keyed by path prefix, so an
-              empty folder has no on-cloud representation.
-            </Typography>
-            {newFolderDialog?.error && (
-              <Typography variant="caption" color="error.main">
-                {newFolderDialog.error}
-              </Typography>
-            )}
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={closeNewFolderDialog}>Cancel</Button>
-          <Button
-            variant="contained"
-            onClick={submitNewFolderDialog}
-            disabled={!newFolderDialog?.name.trim()}
-          >
-            Create
-          </Button>
-        </DialogActions>
-      </Dialog>
+        onChange={setNewFolderDialog}
+        onSubmit={submitNewFolderDialog}
+      />
 
-      <Dialog
-        open={accessDialog !== null}
+      <AccessDialog
+        state={accessDialog}
         onClose={closeAccessDialog}
-        fullWidth
-        maxWidth="xs"
-      >
-        <DialogTitle sx={{ pb: 1 }}>
-          {accessDialog?.mode === "share" ? "Share access" : "Revoke access"}
-        </DialogTitle>
-        <DialogContent dividers>
-          <Stack spacing={1.5} sx={{ mt: 0.5 }}>
-            <Typography variant="body2" color="text.secondary">
-              {accessDialog
-                ? accessDialog.targets.length === 1
-                  ? `${accessDialog.targets[0].is_dir ? "Folder" : "File"}: ${accessDialog.targets[0].path}`
-                  : `${accessDialog.targets.length} items selected`
-                : ""}
-            </Typography>
-            <Autocomplete
-              freeSolo
-              size="small"
-              options={accessDialog?.knownUsers ?? []}
-              value={accessDialog?.selected ?? ""}
-              onChange={(_, value) => {
-                if (!accessDialog) return;
-                setAccessDialog({
-                  ...accessDialog,
-                  selected: typeof value === "string" ? value : "",
-                  error: null,
-                });
-              }}
-              onInputChange={(_, value) => {
-                if (!accessDialog) return;
-                setAccessDialog({ ...accessDialog, selected: value, error: null });
-              }}
-              loading={accessDialog?.loadingUsers ?? false}
-              renderInput={(params) => (
-                <TextField
-                  {...params}
-                  autoFocus
-                  label={accessDialog?.mode === "share" ? "Share with user" : "Revoke from user"}
-                  placeholder="user.account"
-                  InputProps={{
-                    ...params.InputProps,
-                    endAdornment: (
-                      <>
-                        {accessDialog?.loadingUsers
-                          ? <CircularProgress color="inherit" size={16} />
-                          : null}
-                        {params.InputProps.endAdornment}
-                      </>
-                    ),
-                  }}
-                />
-              )}
-            />
-            {accessDialog?.error && (
-              <Typography variant="caption" color="error.main">
-                {accessDialog.error}
-              </Typography>
-            )}
-          </Stack>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={closeAccessDialog}>Cancel</Button>
-          <Button
-            variant="contained"
-            color={accessDialog?.mode === "revoke" ? "warning" : "primary"}
-            onClick={() => void submitAccessDialog()}
-            disabled={!accessDialog || !accessDialog.selected.trim()}
-          >
-            {accessDialog?.mode === "share" ? "Share" : "Revoke"}
-          </Button>
-        </DialogActions>
-      </Dialog>
+        onChange={setAccessDialog}
+        onSubmit={() => void submitAccessDialog()}
+      />
     </Box>
   );
 }
