@@ -27,7 +27,7 @@ column to the right. Clicking a file replaces the right-most preview pane.
 | `MainController` columns | `frontend/src/components/MillerColumns.tsx` |
 | `FileListView` per column | `frontend/src/components/FileColumn.tsx` |
 | right preview pane | `frontend/src/components/PreviewPane.tsx` |
-| bottom action bar | `frontend/src/components/BottomToolbar.tsx` |
+| bottom action bar | `frontend/src/components/BottomToolbar/` |
 | native window title (account) | `frontend/src/App.tsx` `<AppBar>` |
 | account settings dialog | `frontend/src/App.tsx` `<Dialog>` |
 | event listeners on `AltaStataFileSystem` | `subscribeToAltaStataEvents` in `frontend/src/api/altastata.ts` |

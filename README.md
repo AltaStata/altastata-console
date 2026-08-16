@@ -29,17 +29,18 @@ altastata-console/
 ├── frontend/          React + TypeScript + Vite + MUI
 │   └── src/
 │       ├── components/
-│       │   ├── MillerColumns.tsx   ← Finder-style 3-pane layout
-│       │   ├── FileColumn.tsx      ← single column of files/folders
-│       │   ├── PreviewPane.tsx     ← right pane: preview + metadata
-│       │   ├── BottomToolbar.tsx   ← upload/download/share/lock/...
-│       │   └── LogDialog.tsx       ← in-app UI-log panel
-│       ├── utils/logBuffer.ts      ← console.* ring buffer for LogDialog
-│       ├── api/altastata.ts        ← typed API client (gRPC-Web), events
-│       ├── theme/index.ts          ← MUI theme matching JavaFX look
-│       └── types/index.ts          ← shared TS types
+│       │   ├── MillerColumns.tsx       ← Finder-style 3-pane layout
+│       │   ├── FileColumn.tsx          ← single column of files/folders
+│       │   ├── PreviewPane.tsx         ← right pane: preview + metadata
+│       │   ├── BottomToolbar/          ← upload/download/share/lock/...
+│       │   ├── CreateAccountDialog.tsx ← account creation dialog
+│       │   └── LogDialog.tsx           ← in-app UI-log panel
+│       ├── utils/logBuffer.ts          ← console.* ring buffer for LogDialog
+│       ├── api/altastata/              ← typed API client (gRPC-Web), events
+│       ├── theme/index.ts              ← MUI theme matching JavaFX look
+│       └── types/index.ts              ← shared TS types
 ├── scripts/
-│   └── prevent-secrets-commit.sh   ← optional pre-commit secret guard
+│   └── prevent-secrets-commit.sh       ← optional pre-commit secret guard
 └── docs/architecture.md
 ```
 
