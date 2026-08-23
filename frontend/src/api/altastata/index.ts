@@ -28,6 +28,7 @@ export {
   uploadFile,
   uploadBrowserFile,
   deletePath,
+  deletePaths,
   sharePaths,
   revokePaths,
   listKnownUsers,
