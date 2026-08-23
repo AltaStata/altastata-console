@@ -20,6 +20,7 @@ import GridViewIcon from "@mui/icons-material/GridView";
 import { useRef, useState, type ChangeEvent } from "react";
 import {
   deletePath,
+  deletePaths,
   listKnownUsers,
   makeUniqueArchiveName,
   resolveUploadTargetPath,
@@ -399,16 +400,34 @@ export default function BottomToolbar({
       onRefresh();
     }, 2500);
     try {
-      for (let i = 0; i < targets.length; i += 1) {
-        const entry = targets[i];
-        const mark: DeletingTarget = { path: entry.path, recursive: entry.is_dir };
-        const statusLabel = entry.is_dir
-          ? `Deleting folder${targets.length > 1 ? ` ${i + 1}/${targets.length}` : ""}: ${entry.path}…`
-          : `${label} ${i + 1}/${targets.length}: ${entry.path}`;
-        setStatus(statusLabel);
+      const fileTargets = targets.filter((entry) => !entry.is_dir);
+      const folderTargets = targets.filter((entry) => entry.is_dir);
+      let step = 0;
+      const totalSteps = (fileTargets.length > 0 ? 1 : 0) + folderTargets.length;
+
+      if (fileTargets.length > 0) {
+        step += 1;
+        const paths = fileTargets.map((entry) => entry.path);
+        setStatus(
+          fileTargets.length === 1
+            ? `Deleting file: ${paths[0]}…`
+            : `${label} ${step}/${totalSteps}: ${fileTargets.length} files…`,
+        );
+        await deletePaths(paths);
+        for (const entry of fileTargets) {
+          onUnmarkPathsDeleting?.([{ path: entry.path, recursive: false }]);
+        }
+      }
+
+      for (let i = 0; i < folderTargets.length; i += 1) {
+        const entry = folderTargets[i];
+        step += 1;
+        const mark: DeletingTarget = { path: entry.path, recursive: true };
+        setStatus(`Deleting folder ${step}/${totalSteps}: ${entry.path}…`);
         await deletePath(entry.path);
         onUnmarkPathsDeleting?.([mark]);
       }
+
       setStatus(`${label} done`);
       onRefresh();
     } catch (error) {

@@ -71,6 +71,11 @@ message DeleteRequest {
   string time_interval_end = 4;
 }
 message DeleteResponse { repeated FileStatus statuses = 1; }
+message DeleteByPathsRequest {
+  repeated string file_paths = 1;
+  string time_interval_start = 2;
+  string time_interval_end = 3;
+}
 message ShareRequest {
   repeated string file_paths = 1;
   repeated string readers = 2;

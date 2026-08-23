@@ -414,6 +414,17 @@ export async function uploadBrowserFile(
   }
 }
 
+function assertNoFileStatusErrors(statuses: unknown): void {
+  const rows = Array.isArray(statuses)
+    ? (statuses as { error?: string }[])
+    : [];
+  const failed = rows.find((item) => item.error && item.error.trim().length > 0);
+  if (failed?.error) {
+    throw new Error(failed.error);
+  }
+}
+
+/** Delete a folder subtree (prefix query). */
 export async function deletePath(path: string): Promise<void> {
   try {
     await maybeBootstrap();
@@ -433,13 +444,33 @@ export async function deletePath(path: string): Promise<void> {
         true,
         DELETE_REQUEST_TIMEOUT_MS,
     ));
-    const statuses = Array.isArray(resp.statuses)
-      ? (resp.statuses as { error?: string }[])
-      : [];
-    const failed = statuses.find((item) => item.error && item.error.trim().length > 0);
-    if (failed?.error) {
-      throw new Error(failed.error);
-    }
+    assertNoFileStatusErrors(resp.statuses);
+  } catch (error) {
+    throw authHint(error);
+  }
+}
+
+/** Delete explicit file paths in one batch RPC. */
+export async function deletePaths(paths: string[]): Promise<void> {
+  try {
+    await maybeBootstrap();
+    const cloudPaths = paths.map((p) => toCloudPath(p)).filter(Boolean);
+    if (cloudPaths.length === 0) return;
+    // eslint-disable-next-line no-console
+    console.info("[altastata] deletePaths", { paths: cloudPaths });
+    const resp = await withBootstrapRetry(() => grpcUnary(
+        "altastata.v1.FileOpsService/DeleteByPaths",
+        "DeleteByPathsRequest",
+        {
+          filePaths: cloudPaths,
+          timeIntervalStart: "",
+          timeIntervalEnd: "",
+        },
+        "DeleteResponse",
+        true,
+        DELETE_REQUEST_TIMEOUT_MS,
+    ));
+    assertNoFileStatusErrors(resp.statuses);
   } catch (error) {
     throw authHint(error);
   }
